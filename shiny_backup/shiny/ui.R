@@ -6,14 +6,15 @@ shinyUI(fluidPage(
   br(),
   sidebarLayout(
     sidebarPanel(
-      h4(em("Simply enter a sentence, minus the last word, and let me do the rest!")),
+      h4(em("Type a sentence, leaving out the last word, and let me do the rest!")),
       br(),
-      radioButtons("text.type", "I'm looking for a word for my",
+      radioButtons("corpus", "I'm looking for a word for my",
                   c("blog" = "blogs", 
                     "news story" = "news",
                     "tweet" = "tweets")),
       br()),
-      textInput("grams", "What do you have so far?", value = "")
+      textInput("stub", "What do you have so far?", value = "")
+      actionButton("userinput", label = "Submit"), 
     mainPanel(
       tabsetPanel(
         tabPanel('Prediction:',

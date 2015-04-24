@@ -21,45 +21,60 @@
 #rm(list = ls()); gc(reset = TRUE)
 
 library(shiny); library(stringr); library(data.table)
+profanity_list <- readLines("http://www.bannedwordlist.com/lists/swearWords.txt", warn = FALSE)
 
 # load in lookup tables
-blogs.biDT7.sorted <- readRDS("./data/blogs.biDT7.sorted.rds")
-blogs.triDT7.sorted <- readRDS("./data/blogs.triDT7.sorted.rds")
-blogs.tetraDT7.sorted <- readRDS("./data/blogs.tetraDT7.sorted.rds")
-blogs.biDT7.sorted[order(p, decreasing = TRUE)]; blogs.triDT7.sorted[order(bigram, -rank(p))]
-blogs.tetraDT7.sorted[order(trigram, -rank(p))]
+blogs.bi_finDT <- readRDS("data/blogs.bi_finDT.rds")
+blogs.tri_finDT <- readRDS("data/blogs.tri_finDT.rds")
+blogs.tetra_finDT <- readRDS("data/blogs.tetra_finDT.rds")
 
-setkey(blogs.biDT7.sorted); setkey(blogs.triDT7.sorted); setkey(blogs.tetraDT7.sorted)
+news.bi_finDT <- readRDS("data/news.bi_finDT.rds")
+news.tri_finDT <- readRDS("data/news.tri_finDT.rds")
+news.tetra_finDT <- readRDS("data/news.tetra_finDT.rds")
 
-
-news.biDT7.sorted <- readRDS("./data/news.biDT7.sorted.rds")
-news.triDT7.sorted <- readRDS("./data/news.triDT7.sorted.rds")
-news.tetraDT7.sorted <- readRDS("./data/news.tetraDT7.sorted.rds")
-news.biDT7.sorted[order(gram, -rank(p))]; news.triDT7.sorted[order(bigram, -rank(p))]
-news.tetraDT7.sorted[order(trigram, -rank(p))]
-setkey(news.biDT7.sorted); setkey(news.triDT7.sorted); setkey(news.tetraDT7.sorted)
-
-tweets.biDT7.sorted <- readRDS("./data/tweets.biDT7.sorted.rds")
-tweets.triDT7.sorted <- readRDS("./data/tweets.triDT7.sorted.rds")
-tweets.tetraDT7.sorted <- readRDS("./data/tweets.tetraDT7.sorted.rds")
-tweets.biDT7.sorted[order(gram, -rank(p))]; tweets.triDT7.sorted[order(bigram, -rank(p))]
-tweets.tetraDT7.sorted[order(trigram, -rank(p))]
-setkey(tweets.biDT7.sorted); setkey(tweets.triDT7.sorted); setkey(tweets.tetraDT7.sorted)
+tweets.bi_finDT <- readRDS("data/tweets.bi_finDT.rds")
+tweets.tri_finDT <- readRDS("data/tweets.tri_finDT.rds")
+tweets.tetra_finDT <- readRDS("data/tweets.tetra_finDT.rds")
 
 
-# functions performing simple backoff lookup for largest possible n-gram stub
+# Lookup and isolate highest possible n-gram from lookup
+lookup <- function (corpus.type, string) {
+  if (corpus.type == "blogs") {lookup.blogs(string)
+                               if (exists("tetra.target")) {target <<- tetra.target
+                               } else if (exists("tri.target")) {target <<- tri.target
+                               } else if (exists("bi.target")) {target <<- bi.target
+                               }
+                            }
+                                   
+  if (corpus.type == "news") {lookup.news(string)
+                               if (exists("tetra.target")) {target <<- tetra.target
+                               } else if (exists("tri.target")) {target <<- tri.target
+                               } else if (exists("bi.target")) {target <<- bi.target
+                               }
+                            }
+                                     
+  if (corpus.type == "tweets") {lookup.tweets(string)
+                               if (exists("tetra.target")) {target <<- tetra.target
+                               } else if (exists("tri.target")) {target <<- tri.target
+                               } else if (exists("bi.target")) {target <<- bi.target
+                               }
+                            }
+                        }
+
+
+# Functions performing simple backoff lookup for largest possible n-gram stub
 ## BLOGS
 lookup.blogs <- function(gram) {
   gram.n <- length(strsplit(gram,' ')[[1]])
   if (gram.n >= 3) {
     tetra <- word(gram, -3:-1); tetra <- paste(tetra, collapse = ' ')
-    tetra <- blogs.tetraDT7.sorted[tetra][1]
+    tetra <- blogs.tetra_finDT[tetra][1]
     
     tri <- word(gram, -2:-1); tri <- paste(tri, collapse = ' ')
-    tri <- blogs.triDT7.sorted[tri][1]
+    tri <- blogs.tri_finDT[tri][1]
     
     bi <- word(gram, -1)
-    bi <- blogs.biDT7.sorted[bi][1]
+    bi <- blogs.bi_finDT[bi][1]
     
     ifelse (!is.na(tetra$target), tetra.target <<- tetra$target, tetra.target <- tri$target)
     ifelse (!is.na(tetra.target), tetra.target <<- tri$target, tetra.target <<- bi$target)
@@ -67,16 +82,16 @@ lookup.blogs <- function(gram) {
   
   if (gram.n == 2) {
     tri <- word(gram, -2:-1); tri <- paste(tri, collapse = ' ')
-    tri <- blogs.triDT7.sorted[tri][1]
+    tri <- blogs.tri_finDT[tri][1]
     
     bi <- word(gram, -1)
-    bi <- blogs.biDT7.sorted[bi][1]
+    bi <- blogs.bi_finDT[bi][1]
     
     ifelse (!is.na(tri$target), tri.target <<- tri$target, tri.target <<- bi$target)
   }
   
   if (gram.n == 1) {
-    bi <- blogs.biDT7.sorted[gram][1]
+    bi <- blogs.bi_finDT[gram][1]
     bi.target <<- bi$target
   }
 }
@@ -87,13 +102,13 @@ lookup.news <- function(gram) {
   gram.n <- length(strsplit(gram,' ')[[1]])
   if (gram.n >= 3) {
     tetra <- word(gram, -3:-1); tetra <- paste(tetra, collapse = ' ')
-    tetra <- news.tetraDT7.sorted[tetra][1]
+    tetra <- news.tetra_finDT[tetra][1]
     
     tri <- word(gram, -2:-1); tri <- paste(tri, collapse = ' ')
-    tri <- news.triDT7.sorted[tri][1]
+    tri <- news.tri_finDT[tri][1]
     
     bi <- word(gram, -1)
-    bi <- news.biDT7.sorted[bi][1]
+    bi <- news.bi_finDT[bi][1]
     
     ifelse (!is.na(tetra$target), tetra.target <<- tetra$target, tetra.target <- tri$target)
     ifelse (!is.na(tetra.target), tetra.target <<- tri$target, tetra.target <<- bi$target)
@@ -101,16 +116,16 @@ lookup.news <- function(gram) {
   
   if (gram.n == 2) {
     tri <- word(gram, -2:-1); tri <- paste(tri, collapse = ' ')
-    tri <- news.triDT7.sorted[tri][1]
+    tri <- news.tri_finDT[tri][1]
     
     bi <- word(gram, -1)
-    bi <- news.biDT7.sorted[bi][1]
+    bi <- news.bi_finDT[bi][1]
     
     ifelse (!is.na(tri$target), tri.target <<- tri$target, tri.target <<- bi$target)
   }
   
   if (gram.n == 1) {
-    bi <- news.biDT7.sorted[gram][1]
+    bi <- news.bi_finDT[gram][1]
     bi.target <<- bi$target
   }
 }
@@ -121,13 +136,13 @@ lookup.tweets <- function(gram) {
   gram.n <- length(strsplit(gram,' ')[[1]])
   if (gram.n >= 3) {
     tetra <- word(gram, -3:-1); tetra <- paste(tetra, collapse = ' ')
-    tetra <- tweets.tetraDT7.sorted[tetra][1]
+    tetra <- tweets.tetra_finDT[tetra][1]
     
     tri <- word(gram, -2:-1); tri <- paste(tri, collapse = ' ')
-    tri <- tweets.triDT7.sorted[tri][1]
+    tri <- tweets.tri_finDT[tri][1]
     
     bi <- word(gram, -1)
-    bi <- tweets.biDT7.sorted[bi][1]
+    bi <- tweets.bi_finDT[bi][1]
     
     ifelse (!is.na(tetra$target), tetra.target <<- tetra$target, tetra.target <- tri$target)
     ifelse (!is.na(tetra.target), tetra.target <<- tri$target, tetra.target <<- bi$target)
@@ -135,16 +150,16 @@ lookup.tweets <- function(gram) {
   
   if (gram.n == 2) {
     tri <- word(gram, -2:-1); tri <- paste(tri, collapse = ' ')
-    tri <- tweets.triDT7.sorted[tri][1]
+    tri <- tweets.tri_finDT[tri][1]
     
     bi <- word(gram, -1)
-    bi <- tweets.biDT7.sorted[bi][1]
+    bi <- tweets.bi_finDT[bi][1]
     
     ifelse (!is.na(tri$target), tri.target <<- tri$target, tri.target <<- bi$target)
   }
   
   if (gram.n == 1) {
-    bi <- tweets.biDT7.sorted[gram][1]
+    bi <- tweets.bi_finDT[gram][1]
     bi.target <<- bi$target
   }
 }
@@ -152,37 +167,24 @@ lookup.tweets <- function(gram) {
 
 
 shinyServer(function(input, output) {
-  values <- reactiveValues() 
-  observe({
-    corpus <- userinput$corpus
-    string <- userinput$stub
-  })
-    ## Clean incoming string
-    # load profanity list to clean string
-    profanity_list <- readLines("http://www.bannedwordlist.com/lists/swearWords.txt", warn = FALSE)
-    
-    # string coming in from ui.R is cleaned prior to lookup (INCOMING VARIABLE MUST BE CALLED "STRING")
-    string.0 <-tolower(string); string.1 <- str_replace_all(string.0, "[^[:alnum:][:space:]'|’]", ""); 
+
+  observe ({
+  # Clean incoming string
+    string.0 <- tolower(input$stub); string.1 <- str_replace_all(string.0, "[^[:alnum:][:space:]'|’]", ""); 
     string.2 <- iconv(string.1, from="UTF-8", to="ascii", sub=""); string.3 <- iconv(string.2, to="ASCII//TRANSLIT"); 
-    string.4 <- str_replace_all(string.3, "[[:digit:]]+", ""); 
-    string.5 <- str_replace_all(string.4, paste(profanity_list, collapse = "|"), replacement = "")
-    
-    
-    # lookup and isolate highest possible n-gram from lookup
-    if (corpus == "blogs") {lookup.blogs(string.5)
-                            ifelse (exists("tetra.target"), target <<- tetra.target, target <<- tri.target)
-                            ifelse (exists("tri.target"), target <<- tri.target, target <<- bi.target)
-    } else if (corpus == "news") {lookup.news(string.5)
-                               ifelse (exists("tetra.target"), target <<- tetra.target, target <<- tri.target)
-                               ifelse (exists("tri.target"), target <<- tri.target, target <<- bi.target)
-    } else {lookup.news(string.5) 
-                                ifelse (exists("tetra.target"), target <<- tetra.target, target <<- tri.target)
-                                ifelse (exists("tri.target"), target <<- tri.target, target <<- bi.target)
-           }
+    string.4 <- str_replace_all(string.3, "[[:digit:]]+", ""); string.4.5 <- gsub("(^[[:space:]]+|[[:space:]]+$)", "", string.4)
+    string.5 <- str_replace_all(string.4.5, paste(profanity_list, collapse = "|"), replacement = "")
   
-    # output prediction
-    output$prediction <- renderText({
-      paste("My prediction for the next word in your sentence is: ", values$target)
-    })
+    rm(string.0); rm(string.1); rm(string.2); rm(string.3); rm(string.4); rm(string.4.5)
     
-})})
+  output$prediction <- renderText ({
+    if (input$submission == 0)
+      return ()
+    else 
+      
+    lookup(input$corpus, string.5)
+      
+    paste("Your word:", target, ".")
+    })
+  })
+})

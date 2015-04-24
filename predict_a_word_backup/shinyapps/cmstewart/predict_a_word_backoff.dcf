@@ -1,0 +1,4 @@
+name: predict_a_word_backoff
+account: cmstewart
+bundleId: 167835
+url: http://cmstewart.shinyapps.io/predict_a_word_backoff

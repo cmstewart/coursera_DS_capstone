@@ -1,0 +1,1443 @@
+---
+title: "Capstone4.1"
+author: "Christopher Stewart"
+date: "April 13, 2015"
+output: html_document
+---
+
+## Introduction 
+This document reports on the Capstone project marking the end of the 9-course Data Science Specialization offered by Coursera and the John Hopkins Department of Biostatistics. The purpose of this project is to apply the knowledge gained throughout the specialization's courses to a novel data science problem: text prediction. Specifically, we use large text files to build a text prediction algorithmthat is then incorporated into an interface that can be accessed by others. The project is offered in cooperation with Swiftkey, a company building smart prediction technology for easier mobile typing. Documentation on my Shiny data product is available in an [R Studio Presenter presentation](insert URL here).
+
+I have elected to complete the project in R as per the parameters of the assignment, but also in Python to get hands-on experience with the Python's Natural Language Toolkit ([NLTK](http://www.nltk.org/)). A report on the Python version of the project is available [here](insert URL here).
+
+
+## Data preparation and exploration
+
+### Data Acquisition
+
+Initially, we download the data and unzip the data files, switching working directories to that of the English language text files. We then print out the contents of the current directory to ensure that everything is in order.
+
+```{r data acquisition}
+suppressPackageStartupMessages(require("downloader")); suppressPackageStartupMessages(require("R.utils"))
+
+# Download, unzip data and setwd()
+url <- "http://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip"
+download(url, dest = "data.zip", mode = "wb")
+unzip("data.zip", exdir = "./")
+
+# Set working directory
+setwd(paste(getwd(),"/final/en_US",sep=""))
+list.files()
+
+# Clean up
+rm(url)
+```
+
+### Test, Training and Corpus Split
+
+Next we read in the data and divide the "blogs", "news" and "twitter" data into three parts:
+
+1. Our _test_ set will be used as a final metric of the accuracy of the text prediction algorithm. For it, we set aside 10% of each data file.
+
+2. From the remaining 90%, 10% is set aside as _training_ data, to be used to improve the model derived from the bulk of the data. 
+
+3. The remaining data will be referred to as the _corpus_ data. This data will be used to develop the initial model. 
+
+For now, both of the latter are grouped as a "rest" object.
+
+
+```{r load and separate test from rest}
+suppressPackageStartupMessages(require("stats"))
+
+blogs <- readLines("en_US.blogs.txt")
+news <- readLines("en_US.news.txt")
+tweets <- readLines("en_US.twitter.txt", skipNul = TRUE)
+
+set.seed(1)
+blogs.test <- blogs[sample(1:length(blogs), 0.10*length(blogs), replace = FALSE)]
+blogs.rest <- blogs[!blogs %in% blogs.test]
+
+news.test <- news[sample(1:length(news), 0.10*length(news), replace = FALSE)]
+news.rest <- news[!news %in% news.test]
+
+tweets.test <- tweets[sample(1:length(tweets), 0.10*length(tweets), replace = FALSE)]
+tweets.rest <- tweets[!tweets %in% tweets.test]
+
+# Clean up
+rm(blogs); rm(news); rm(tweets)
+rm(blogs.test); rm(news.test); rm(tweets.test)
+```
+
+
+### Data cleaning
+
+A quick look at the first few lines of each corpus reveal the presence of elements that we *don't want* to predict, including emoticons, numbers, profanity, punctuation, etc. We clean our corpora so that these do not go into the models. 
+
+
+```{r clean data using regex}
+suppressPackageStartupMessages(require("stringr"))
+
+profanity_list <- readLines("http://www.bannedwordlist.com/lists/swearWords.txt", warn = FALSE)
+
+# blogs
+blogs.rest.1 <- tolower(blogs.rest)
+blogs.rest.2 <- str_replace_all(blogs.rest.1, "[^[:alnum:][:space:]'|’]", ""); blogs.rest.2 <- iconv(blogs.rest.2, from="UTF-8", to="ascii", sub=""); blogs.rest.2 <- iconv(blogs.rest.2, to="ASCII//TRANSLIT")
+blogs.rest.3 <- str_replace_all(blogs.rest.2, "[[:digit:]]+", "")
+blogs.rest.4 <- str_replace_all(blogs.rest.3, paste(profanity_list, collapse = "|"), replacement = "")
+
+### Clean up
+rm(blogs.rest); rm(blogs.rest.1); rm(blogs.rest.2); rm(blogs.rest.3)
+
+# news
+news.rest.1 <- tolower(news.rest)
+news.rest.2 <- str_replace_all(news.rest.1, "[^[:alnum:][:space:]'|’]", ""); news.rest.2 <- iconv(news.rest.2, from="UTF-8", to="ascii", sub=""); news.rest.2 <- iconv(news.rest.2, to="ASCII//TRANSLIT")
+news.rest.3 <- str_replace_all(news.rest.2, "[[:digit:]]+", "")
+news.rest.4 <- str_replace_all(news.rest.3, paste(profanity_list, collapse = "|"), replacement = "")
+
+### Clean up
+rm(news.rest); rm(news.rest.1); rm(news.rest.2); rm(news.rest.3)
+
+# tweets
+tweets.rest.1 <- tolower(tweets.rest)
+tweets.rest.2 <- str_replace_all(tweets.rest.1, "[^[:alnum:][:space:]'|’]", ""); tweets.rest.2 <- iconv(tweets.rest.2, from="UTF-8", to="ascii", sub=""); tweets.rest.2 <- iconv(tweets.rest.2, to="ASCII//TRANSLIT")
+tweets.rest.3 <- str_replace_all(tweets.rest.2, "[[:digit:]]+", "")
+tweets.rest.4 <- str_replace_all(tweets.rest.3, paste(profanity_list, collapse = "|"), replacement = "")
+
+## Clean up
+rm(tweets.rest); rm(tweets.rest.1); rm(tweets.rest.2); rm(tweets.rest.3)
+
+```
+
+
+In the next step of data processing, we use R's [stringi](http://cran.r-project.org/web/packages/stringi/index.html) package to look at highly infrequent terms in the data. A quick look at the blogs data (below) reveals that almost half (46%) of the tokens only occur once. 
+
+```{r}
+suppressPackageStartupMessages(require("stringi"))
+x_name <- "grams"; y_name <- "frequency"
+
+blogs.rest.tok <- sort(table(unlist(strsplit(blogs.rest.4, split = "[[:space:]]+"))), decreasing=TRUE)
+blogs.rest.tok_freqs <- as.numeric(unlist(regmatches(blogs.rest.tok, gregexpr("[[:digit:]]+", blogs.rest.tok))))
+blogs.rest.tok_tab = data.frame(names(blogs.rest.tok), blogs.rest.tok_freqs); names(blogs.rest.tok_tab) <- c(x_name, y_name)
+
+# Look at frequency of unigrams w/ n = 1
+blogs_1grams.nof1 <- subset(blogs.rest.tok_tab, frequency <= 1)
+cat('Out of', length(blogs.rest.tok_tab$grams), 'tokens, about', round((length(blogs_1grams.nof1$grams) / length(blogs.rest.tok_tab$grams) * 100), digits = 0), '% occur only once.')
+
+# Clean up
+rm(blogs.rest.tok); rm(blogs.rest.tok_freqs); rm(blogs.rest.tok_tab); rm(blogs_1grams.nof1)
+
+```
+
+This finding suggests a high degree of sparsity in the data, an issue that will have to be addressed during model building.
+
+
+## Modeling
+
+### Corpus and Validation Data
+
+At this point, we separate the corpus data from the validation data. The latter will be used to refine our model, the former is used to construct a first pass at it. 
+
+```{r separating corpus (80%) from validation (10%) data}
+dir.create(path = "./validation/")
+
+set.seed(2)
+blogs.val <- blogs.rest.4[sample(1:length(blogs.rest.4), 0.10*length(blogs.rest.4), replace = FALSE)]; blogs.corpus <- blogs.rest.4[!blogs.rest.4 %in% blogs.val]
+
+news.val <- news.rest.4[sample(1:length(news.rest.4), 0.10*length(news.rest.4), replace = FALSE)]; news.corpus <- news.rest.4[!news.rest.4 %in% news.val]
+
+
+tweets.val <- tweets.rest.4[sample(1:length(tweets.rest.4), 0.10*length(tweets.rest.4), replace = FALSE)]; tweets.corpus <- tweets.rest.4[!tweets.rest.4 %in% tweets.val]
+
+write.table(blogs.val, file = "./validation/blogs.validation.txt")
+write.table(news.val, file = "./validation/news.validation.txt")
+write.table(tweets.val, file = "./validation/tweets.validation.txt")
+
+#Clean up
+rm(blogs.rest.4); rm(news.rest.4); rm(tweets.rest.4)
+```
+
+### Tokenization, n-gram constructions, frequency tables and n-gram probabilities
+
+We now tokenize and produce 2-, 3- and 4-grams using Maciej Szymkiewicz's efficient [Ngrams_tokenizer](https://github.com/zero323/r-snippets/blob/master/R/ngram_tokenizer.R) function. We write tokenized 
+
+```{r tokenize}
+dir.create(path = "./tokenized/")
+
+source("Ngrams_tokenizer.R")
+tokenizer <- ngram_tokenizer(1)
+blogs.corpus_tok <- tokenizer(blogs.corpus)
+news.corpus_tok <- tokenizer(news.corpus)
+tweets.corpus_tok <- tokenizer(tweets.corpus)
+write.table(blogs.corpus_tok, file = "./tokenized/blogs.corpus_tok.txt")
+write.table(news.corpus_tok, file = "./tokenized/news.corpus_tok.txt")
+write.table(tweets.corpus_tok, file = "./tokenized/tweets.corpus_tok.txt")
+```
+
+Next, we process our tokens in order to produce higher order n-grams with MLEs (called "p" in data files). Sparsity is addressed by eliminating highly infrequent data.
+
+```{r unigrams}
+suppressPackageStartupMessages(require("data.table"))
+setwd(paste(getwd(),"/tokenized",sep=""))
+
+## Blogs
+blogs.corpus_tok <- fread("blogs.corpus_tok.txt"); blogs.corpus_tok[,c(1,2,4) := NULL]; setnames(blogs.corpus_tok, "V3", "token")
+blogs.tokC <- blogs.corpus_tok[,token.count:=.N, by = token]
+blogs.tokP <- blogs.tokC[,p := round((token.count / sum(unique(token.count))), digits = 5)]
+blogs.tokP[, 2 := NULL]
+blogs.tok_PUNK <- blogs.tokP[p < 0.00001, token := "UNK"]
+
+# Get p-values, indices and words & indices; write to file
+blogs.tok_ps <- subset(unique(blogs.tok_PUNK[,. (token, p)]))
+save(blogs.tok_ps, file = "blogs.tok_ps.RData")
+
+blogs.toks <- t(blogs.tok_PUNK[, token]); save(blogs.toks, file = "blogs.toks.RData")
+
+# Clean up
+rm(blogs.corpus_tok); rm(blogs.tokC); rm(blogs.tokP); rm(blogs.tok_PUNK); rm(blogs.tok_ps); rm(blogs.toks)
+
+
+## News
+news.corpus_tok <- fread("news.corpus_tok.txt"); news.corpus_tok[,c(1,2,4) := NULL]; setnames(news.corpus_tok, "V3", "token")
+news.tokC <- news.corpus_tok[,token.count:=.N, by = token]
+news.tokP <- news.tokC[,p := round((token.count / sum(unique(token.count))), digits = 5)]
+news.tokP[, 2 := NULL]
+news.tok_PUNK <- news.tokP[p < 0.00001, token := "UNK"]
+
+# Get p-values, indices and words & indices; write to file
+news.tok_ps <- subset(unique(news.tok_PUNK[,. (token, p)]))
+save(news.tok_ps, file = "news.tok_ps.RData")
+
+news.toks <- t(news.tok_PUNK[, token]); save(news.toks, file = "news.toks.RData")
+
+# Clean up
+rm(news.corpus_tok); rm(news.tokC); rm(news.tokP); rm(news.tok_PUNK); rm(news.tok_ps); rm(news.toks)
+
+
+## Tweets
+tweets.corpus_tok <- fread("tweets.corpus_tok.txt"); tweets.corpus_tok[,c(1,2,4) := NULL]; setnames(tweets.corpus_tok, "V3", "token")
+tweets.tokC <- tweets.corpus_tok[,token.count:=.N, by = token]
+tweets.tokP <- tweets.tokC[,p := round((token.count / sum(unique(token.count))), digits = 5)]
+tweets.tokP[, 2 := NULL]
+tweets.tok_PUNK <- tweets.tokP[p < 0.00001, token := "UNK"]
+
+# Get p-values, indices and words & indices; write to file
+tweets.tok_ps <- subset(unique(tweets.tok_PUNK[,. (token, p)]))
+save(tweets.tok_ps, file = "tweets.tok_ps.RData")
+
+tweets.toks <- t(tweets.tok_PUNK[, token]); save(tweets.toks, file = "tweets.toks.RData")
+
+# Clean up
+rm(tweets.corpus_tok); rm(tweets.tokC); rm(tweets.tokP); rm(tweets.tok_PUNK); rm(tweets.tok_ps); rm(tweets.toks)
+
+```
+
+We now make bigrams...
+
+```{r bigrams}
+
+## BLOGS
+load("blogs.toks.RData")
+blogs.toks1 <- noquote(as.vector(blogs.toks))
+
+source("Ngrams_tokenizer.R")
+bigram.tokenizer <- ngram_tokenizer(2)
+
+## Make bigrams, eliminate bigrams w/ "UNK", get counts, eliminate bigrams with C(W) <= 3
+blogs.bi <- bigram.tokenizer(blogs.toks1); blogs.biDT <- as.data.table(blogs.bi); setnames(blogs.biDT, "bigram")
+blogs.biDT1 <- blogs.biDT[!bigram %like% "UNK"]
+
+blogs.biDT2 <- blogs.biDT1[,bigram.count:=.N, by = bigram]
+blogs.biDT3 <- subset(blogs.biDT2, bigram.count > 3) 
+
+# Eliminate duplication, split "gram" from "target" and get rid of bigrams
+blogs.biDT4 <- blogs.biDT3[order(-bigram.count)]; blogs.biDT4.1 <- unique(blogs.biDT4)
+blogs.biDT5 <- blogs.biDT4.1[, c("gram", "target") := tstrsplit(bigram, " ", fixed=TRUE)]
+blogs.biDT5[,1:=NULL]
+setcolorder(blogs.biDT5, c("gram", "target", "bigram.count"))
+
+# Order by gram, add gram & "unigram" counts, calculate ps
+blogs.biDT6 <- blogs.biDT5[order(gram)]
+blogs.biDT6[,gram.count:=.N, by = gram]
+blogs.biDT6[,unigram.count := gram.count + bigram.count]
+blogs.biDT7 <- blogs.biDT6[,p := round((bigram.count / unigram.count), digits = 4)]
+blogs.biDT7[,c(3,4,5):=NULL]
+
+# Clean up
+rm(blogs.bi); rm(blogs.biDT); rm(blogs.biDT1); rm(blogs.biDT2); rm(blogs.biDT3); rm(blogs.biDT4); rm(blogs.biDT4.1); rm(blogs.biDT5); rm(blogs.biDT6)
+
+
+## NEWS
+load("news.toks.RData")
+news.toks1 <- noquote(as.vector(news.toks))
+
+## Make bigrams, eliminate bigrams w/ "UNK", get counts, eliminate bigrams with C(W) <= 3
+news.bi <- bigram.tokenizer(news.toks1); news.biDT <- as.data.table(news.bi); setnames(news.biDT, "bigram")
+news.biDT1 <- news.biDT[!bigram %like% "UNK"]
+
+news.biDT2 <- news.biDT1[,bigram.count:=.N, by = bigram]
+news.biDT3 <- subset(news.biDT2, bigram.count > 3) 
+
+# Eliminate duplication, split "gram" from "target" and get rid of bigrams
+news.biDT4 <- news.biDT3[order(-bigram.count)]; news.biDT4.1 <- unique(news.biDT4)
+news.biDT5 <- news.biDT4.1[, c("gram", "target") := tstrsplit(bigram, " ", fixed=TRUE)]
+news.biDT5[,1:=NULL]
+setcolorder(news.biDT5, c("gram", "target", "bigram.count"))
+
+# Order by gram, add gram & "unigram" counts, calculate ps
+news.biDT6 <- news.biDT5[order(gram)]
+news.biDT6[,gram.count:=.N, by = gram]
+news.biDT6[,unigram.count := gram.count + bigram.count]
+news.biDT7 <- news.biDT6[,p := round((bigram.count / unigram.count), digits = 4)]
+news.biDT7[,c(3,4,5):=NULL]
+
+# Clean up
+rm(news.bi); rm(news.biDT); rm(news.biDT1); rm(news.biDT2); rm(news.biDT3); rm(news.biDT4); rm(news.biDT4.1); rm(news.biDT5); rm(news.biDT6)
+
+
+## TWEETS
+load("tweets.toks.RData")
+tweets.toks1 <- noquote(as.vector(tweets.toks))
+
+source("Ngrams_tokenizer.R")
+bigram.tokenizer <- ngram_tokenizer(2)
+
+## Make bigrams, eliminate bigrams w/ "UNK", get counts, eliminate bigrams with C(W) <= 3
+tweets.bi <- bigram.tokenizer(tweets.toks1); tweets.biDT <- as.data.table(tweets.bi); setnames(tweets.biDT, "bigram")
+tweets.biDT1 <- tweets.biDT[!bigram %like% "UNK"]
+
+tweets.biDT2 <- tweets.biDT1[,bigram.count:=.N, by = bigram]
+tweets.biDT3 <- subset(tweets.biDT2, bigram.count > 3) 
+
+# Eliminate duplication, split "gram" from "target" and get rid of bigrams
+tweets.biDT4 <- tweets.biDT3[order(-bigram.count)]; tweets.biDT4.1 <- unique(tweets.biDT4)
+tweets.biDT5 <- tweets.biDT4.1[, c("gram", "target") := tstrsplit(bigram, " ", fixed=TRUE)]
+tweets.biDT5[,1:=NULL]
+setcolorder(tweets.biDT5, c("gram", "target", "bigram.count"))
+
+# Order by gram, add gram & "unigram" counts, calculate ps
+tweets.biDT6 <- tweets.biDT5[order(gram)]
+tweets.biDT6[,gram.count:=.N, by = gram]
+tweets.biDT6[,unigram.count := gram.count + bigram.count]
+tweets.biDT7 <- tweets.biDT6[,p := round((bigram.count / unigram.count), digits = 4)]
+tweets.biDT7[,c(3,4,5):=NULL]
+
+# Clean up
+rm(tweets.bi); rm(tweets.biDT); rm(tweets.biDT1); rm(tweets.biDT2); rm(tweets.biDT3); rm(tweets.biDT4); rm(tweets.biDT4.1); rm(tweets.biDT5); rm(tweets.biDT6)
+
+```
+
+trigrams...
+
+```{r trigrams}
+trigram.tokenizer <- ngram_tokenizer(3)
+
+## BLOGS
+## Make trigrams, eliminate trigrams w/ "UNK", get counts, eliminate trigrams with C(W) <= 3
+blogs.tri <- trigram.tokenizer(blogs.toks1); blogs.triDT <- as.data.table(blogs.tri); setnames(blogs.triDT, "trigram")
+blogs.triDT1 <- blogs.triDT[!trigram %like% "UNK"]
+
+blogs.triDT2 <- blogs.triDT1[,trigram.count:=.N, by = trigram]
+blogs.triDT3 <- subset(blogs.triDT2, trigram.count > 3) 
+
+# Eliminate duplication, split "wi_2", "gram" and "target" and get rid of trigrams
+blogs.triDT4 <- blogs.triDT3[order(-trigram.count)]; blogs.trisampDT4.1 <- unique(blogs.trisampDT4)
+blogs.triDT5 <- blogs.triDT4.1[, c("wi_2", "gram", "target") := tstrsplit(trigram, " ", fixed=TRUE)]
+blogs.triDT5[,1:=NULL]
+setcolorder(blogs.triDT5, c("wi_2", "gram", "target", "trigram.count"))
+
+# Concatenate "wi_2" and "gram" into "bigram", then sort on "bigram"
+blogs.triDT5.1 <- blogs.triDT5[, bigram := paste(blogs.triDT5[,wi_2], blogs.triDT5[,gram], sep = " ")]
+blogs.triDT5.1[,c(1,2):=NULL]; setcolorder(blogs.triDT5.1, c("bigram", "target", "trigram.count"))
+
+# Count "bigrams", count "twograms", get ps
+blogs.triDT5.1 <- blogs.triDT5.1[order(bigram)]
+blogs.triDT6 <- blogs.triDT5.1[,bigram.count:=.N, by = bigram]
+blogs.triDT6.1 <- blogs.triDT6[,twogram.count := trigram.count + bigram.count]
+blogs.triDT7 <- blogs.triDT6.1[,p := round((trigram.count / twogram.count), digits = 4)]
+
+blogs.triDT7[,c(3,4,5):=NULL]
+
+# Clean up
+rm(blogs.toks); rm(blogs.toksamp); rm(blogs.trisamp); rm(blogs.trisampDT); rm(blogs.trisampDT1); rm(blogs.trisampDT2); rm(blogs.trisampDT3); rm(blogs.trisampDT4); rm(blogs.trisampDT4.1); rm(blogs.trisampDT5); rm(blogs.trisampDT5.1); rm(blogs.trisampDT6); rm(blogs.trisampDT6.1)
+
+
+## NEWS
+## Make trigrams, eliminate trigrams w/ "UNK", get counts, eliminate trigrams with C(W) <= 3
+news.tri <- trigram.tokenizer(news.toks1); news.triDT <- as.data.table(news.tri); setnames(news.triDT, "trigram")
+news.triDT1 <- news.triDT[!trigram %like% "UNK"]
+
+news.triDT2 <- news.triDT1[,trigram.count:=.N, by = trigram]
+news.triDT3 <- subset(news.triDT2, trigram.count > 3) 
+
+# Eliminate duplication, split "wi_2", "gram" and "target" and get rid of trigrams
+news.triDT4 <- news.triDT3[order(-trigram.count)]; news.trisampDT4.1 <- unique(news.trisampDT4)
+news.triDT5 <- news.triDT4.1[, c("wi_2", "gram", "target") := tstrsplit(trigram, " ", fixed=TRUE)]
+news.triDT5[,1:=NULL]
+setcolorder(news.triDT5, c("wi_2", "gram", "target", "trigram.count"))
+
+# Concatenate "wi_2" and "gram" into "bigram", then sort on "bigram"
+news.triDT5.1 <- news.triDT5[, bigram := paste(news.triDT5[,wi_2], news.triDT5[,gram], sep = " ")]
+news.triDT5.1[,c(1,2):=NULL]; setcolorder(news.triDT5.1, c("bigram", "target", "trigram.count"))
+
+# Count "bigrams", count "twograms", get ps
+news.triDT5.1 <- news.triDT5.1[order(bigram)]
+news.triDT6 <- news.triDT5.1[,bigram.count:=.N, by = bigram]
+news.triDT6.1 <- news.triDT6[,twogram.count := trigram.count + bigram.count]
+news.triDT7 <- news.triDT6.1[,p := round((trigram.count / twogram.count), digits = 4)]
+
+news.triDT7[,c(3,4,5):=NULL]
+
+# Clean up
+rm(news.toks); rm(news.toksamp); rm(news.trisamp); rm(news.trisampDT); rm(news.trisampDT1); rm(news.trisampDT2); rm(news.trisampDT3); rm(news.trisampDT4); rm(news.trisampDT4.1); rm(news.trisampDT5); rm(news.trisampDT5.1); rm(news.trisampDT6); rm(news.trisampDT6.1)
+
+
+## TWEETS
+## Make trigrams, eliminate trigrams w/ "UNK", get counts, eliminate trigrams with C(W) <= 3
+tweets.tri <- trigram.tokenizer(tweets.toks1); tweets.triDT <- as.data.table(tweets.tri); setnames(tweets.triDT, "trigram")
+tweets.triDT1 <- tweets.triDT[!trigram %like% "UNK"]
+
+tweets.triDT2 <- tweets.triDT1[,trigram.count:=.N, by = trigram]
+tweets.triDT3 <- subset(tweets.triDT2, trigram.count > 3) 
+
+# Eliminate duplication, split "wi_2", "gram" and "target" and get rid of trigrams
+tweets.triDT4 <- tweets.triDT3[order(-trigram.count)]; tweets.trisampDT4.1 <- unique(tweets.trisampDT4)
+tweets.triDT5 <- tweets.triDT4.1[, c("wi_2", "gram", "target") := tstrsplit(trigram, " ", fixed=TRUE)]
+tweets.triDT5[,1:=NULL]
+setcolorder(tweets.triDT5, c("wi_2", "gram", "target", "trigram.count"))
+
+# Concatenate "wi_2" and "gram" into "bigram", then sort on "bigram"
+tweets.triDT5.1 <- tweets.triDT5[, bigram := paste(tweets.triDT5[,wi_2], tweets.triDT5[,gram], sep = " ")]
+tweets.triDT5.1[,c(1,2):=NULL]; setcolorder(tweets.triDT5.1, c("bigram", "target", "trigram.count"))
+
+# Count "bigrams", count "twograms", get ps
+tweets.triDT5.1 <- tweets.triDT5.1[order(bigram)]
+tweets.triDT6 <- tweets.triDT5.1[,bigram.count:=.N, by = bigram]
+tweets.triDT6.1 <- tweets.triDT6[,twogram.count := trigram.count + bigram.count]
+tweets.triDT7 <- tweets.triDT6.1[,p := round((trigram.count / twogram.count), digits = 4)]
+
+tweets.triDT7[,c(3,4,5):=NULL]
+
+# Clean up
+rm(tweets.toks); rm(tweets.toksamp); rm(tweets.trisamp); rm(tweets.trisampDT); rm(tweets.trisampDT1); rm(tweets.trisampDT2); rm(tweets.trisampDT3); rm(tweets.trisampDT4); rm(tweets.trisampDT4.1); rm(tweets.trisampDT5); rm(tweets.trisampDT5.1); rm(tweets.trisampDT6); rm(tweets.trisampDT6.1)
+
+```
+
+and tetragrams.
+
+```{r tetragrams}
+tetragram.tokenizer <- ngram_tokenizer(4)
+
+## BLOGS
+## Make tetragrams, eliminate tetragrams w/ "UNK", get counts, eliminate tetragrams with C(W) <= 3
+blogs.tetra <- tetragram.tokenizer(blogs.toks1); blogs.tetraDT <- as.data.table(blogs.tetra); setnames(blogs.tetraDT, "tetragram")
+blogs.tetraDT1 <- blogs.tetraDT[!tetragram %like% "UNK"]
+
+blogs.tetraDT2 <- blogs.tetraDT1[,tetragram.count:=.N, by = tetragram]
+blogs.tetraDT3 <- subset(blogs.tetraDT2, tetragram.count > 3) 
+
+# Eliminate duplication, split "wi_2", "gram" and "target" and get rid of tetragrams
+blogs.tetraDT4 <- blogs.tetraDT3[order(-tetragram.count)]; blogs.tetraDT4.1 <- unique(blogs.tetraDT4)
+blogs.tetraDT5 <- blogs.tetraDT4.1[, c("wi_3", "wi_2", "gram", "target") := tstrsplit(tetragram, " ", fixed=TRUE)]
+blogs.tetraDT5[,1:=NULL]
+setcolorder(blogs.tetraDT5, c("wi_3", "wi_2", "gram", "target", "tetragram.count"))
+
+# Concatenate "wi_3", "wi_2" & "gram" into "trigram", then sort on "trigram"
+blogs.tetraDT5.1 <- blogs.tetraDT5[, trigram := paste(blogs.tetrasampDT5[,wi_3], blogs.tetrasampDT5[,wi_2], blogs.tetrasampDT5[,gram], sep = " ")]
+blogs.tetraDT5.1[,c(1,2,3):=NULL]; setcolorder(blogs.tetraDT5.1, c("trigram", "target", "tetragram.count"))
+
+# Count "trigrams", count "threegrams", get ps
+blogs.tetraDT5.1 <- blogs.tetraDT5.1[order(trigram)]
+blogs.tetraDT6 <- blogs.tetraDT5.1[,trigram.count:=.N, by = trigram]
+blogs.tetraDT6.1 <- blogs.tetraDT6[,threegram.count := tetragram.count + trigram.count]
+blogs.tetraDT7 <- blogs.tetraDT6.1[,p := round((tetragram.count / threegram.count), digits = 4)]
+
+blogs.tetraDT7[,c(3,4,5):=NULL]
+
+# Clean up
+rm(blogs.toks1);  rm(blogs.tetra); rm(blogs.tetraDT); rm(blogs.tetraDT1); rm(blogs.tetraDT2); rm(blogs.tetraDT3); rm(blogs.tetraDT4); rm(blogs.tetraDT4.1); rm(blogs.tetraDT5); rm(blogs.tetraDT5.1); rm(blogs.tetraDT6); rm(blogs.tetraDT6.1)
+
+## NEWS
+## Make tetragrams, eliminate tetragrams w/ "UNK", get counts, eliminate tetragrams with C(W) <= 3
+news.tetra <- tetragram.tokenizer(news.toks1); news.tetraDT <- as.data.table(news.tetra); setnames(news.tetraDT, "tetragram")
+news.tetraDT1 <- news.tetraDT[!tetragram %like% "UNK"]
+
+news.tetraDT2 <- news.tetraDT1[,tetragram.count:=.N, by = tetragram]
+news.tetraDT3 <- subset(news.tetraDT2, tetragram.count > 3) 
+
+# Eliminate duplication, split "wi_2", "gram" and "target" and get rid of tetragrams
+news.tetraDT4 <- news.tetraDT3[order(-tetragram.count)]; news.tetraDT4.1 <- unique(news.tetraDT4)
+news.tetraDT5 <- news.tetraDT4.1[, c("wi_3", "wi_2", "gram", "target") := tstrsplit(tetragram, " ", fixed=TRUE)]
+news.tetraDT5[,1:=NULL]
+setcolorder(news.tetraDT5, c("wi_3", "wi_2", "gram", "target", "tetragram.count"))
+
+# Concatenate "wi_3", "wi_2" & "gram" into "trigram", then sort on "trigram"
+news.tetraDT5.1 <- news.tetraDT5[, trigram := paste(news.tetrasampDT5[,wi_3], news.tetrasampDT5[,wi_2], news.tetrasampDT5[,gram], sep = " ")]
+news.tetraDT5.1[,c(1,2,3):=NULL]; setcolorder(news.tetraDT5.1, c("trigram", "target", "tetragram.count"))
+
+# Count "trigrams", count "threegrams", get ps
+news.tetraDT5.1 <- news.tetraDT5.1[order(trigram)]
+news.tetraDT6 <- news.tetraDT5.1[,trigram.count:=.N, by = trigram]
+news.tetraDT6.1 <- news.tetraDT6[,threegram.count := tetragram.count + trigram.count]
+news.tetraDT7 <- news.tetraDT6.1[,p := round((tetragram.count / threegram.count), digits = 4)]
+
+news.tetraDT7[,c(3,4,5):=NULL]
+
+# Clean up
+rm(news.toks1);  rm(news.tetra); rm(news.tetraDT); rm(news.tetraDT1); rm(news.tetraDT2); rm(news.tetraDT3); rm(news.tetraDT4); rm(news.tetraDT4.1); rm(news.tetraDT5); rm(news.tetraDT5.1); rm(news.tetraDT6); rm(news.tetraDT6.1)
+
+## TWEETS 
+## Make tetragrams, eliminate tetragrams w/ "UNK", get counts, eliminate tetragrams with C(W) <= 3
+tweets.tetra <- tetragram.tokenizer(tweets.toks1); tweets.tetraDT <- as.data.table(tweets.tetra); setnames(tweets.tetraDT, "tetragram")
+tweets.tetraDT1 <- tweets.tetraDT[!tetragram %like% "UNK"]
+
+tweets.tetraDT2 <- tweets.tetraDT1[,tetragram.count:=.N, by = tetragram]
+tweets.tetraDT3 <- subset(tweets.tetraDT2, tetragram.count > 3) 
+
+# Eliminate duplication, split "wi_2", "gram" and "target" and get rid of tetragrams
+tweets.tetraDT4 <- tweets.tetraDT3[order(-tetragram.count)]; tweets.tetraDT4.1 <- unique(tweets.tetraDT4)
+tweets.tetraDT5 <- tweets.tetraDT4.1[, c("wi_3", "wi_2", "gram", "target") := tstrsplit(tetragram, " ", fixed=TRUE)]
+tweets.tetraDT5[,1:=NULL]
+setcolorder(tweets.tetraDT5, c("wi_3", "wi_2", "gram", "target", "tetragram.count"))
+
+# Concatenate "wi_3", "wi_2" & "gram" into "trigram", then sort on "trigram"
+tweets.tetraDT5.1 <- tweets.tetraDT5[, trigram := paste(tweets.tetrasampDT5[,wi_3], tweets.tetrasampDT5[,wi_2], tweets.tetrasampDT5[,gram], sep = " ")]
+tweets.tetraDT5.1[,c(1,2,3):=NULL]; setcolorder(tweets.tetraDT5.1, c("trigram", "target", "tetragram.count"))
+
+# Count "trigrams", count "threegrams", get ps
+tweets.tetraDT5.1 <- tweets.tetraDT5.1[order(trigram)]
+tweets.tetraDT6 <- tweets.tetraDT5.1[,trigram.count:=.N, by = trigram]
+tweets.tetraDT6.1 <- tweets.tetraDT6[,threegram.count := tetragram.count + trigram.count]
+tweets.tetraDT7 <- tweets.tetraDT6.1[,p := round((tetragram.count / threegram.count), digits = 4)]
+
+tweets.tetraDT7[,c(3,4,5):=NULL]
+
+# Clean up
+rm(tweets.toks1);  rm(tweets.tetra); rm(tweets.tetraDT); rm(tweets.tetraDT1); rm(tweets.tetraDT2); rm(tweets.tetraDT3); rm(tweets.tetraDT4); rm(tweets.tetraDT4.1); rm(tweets.tetraDT5); rm(tweets.tetraDT5.1); rm(tweets.tetraDT6); rm(tweets.tetraDT6.1)
+rm(bigram.tokenizer); rm(trigram.tokenizer); rm(tetragram.tokenizer); rm(ngram_tokenizer)
+
+```
+
+Finally, we sort our n-gram lookup tables and write them to disk.
+
+```{r write sorted n-gram lookup tables}
+
+dir.create(path = "./finalDTs/")
+
+# Blogs
+blogs.bi_finDT = copy(blogs.biDT7)
+setorder(blogs.bi_finDT, gram, -p)
+setkey(blogs.bi_finDT, gram)
+saveRDS(blogs.bi_finDT, "./finalDTs/blogs.bi_finDT.rds")
+
+blogs.tri_finDT = copy(blogs.triDT7)
+setorder(blogs.tri_finDT, bigram, -p)
+setkey(blogs.tri_finDT, bigram)
+saveRDS(blogs.tri_finDT, "./finalDTs/blogs.tri_finDT.rds")
+
+blogs.tetra_finDT = copy(blogs.tetraDT7)
+setorder(blogs.tetra_finDT, trigram, -p)
+setkey(blogs.tetra_finDT, trigram)
+saveRDS(blogs.tetra_finDT, "./finalDTs/blogs.tetra_finDT.rds")
+
+# News
+news.bi_finDT = copy(news.biDT7)
+setorder(news.bi_finDT, gram, -p)
+setkey(news.bi_finDT, gram)
+saveRDS(news.bi_finDT, "./finalDTs/news.bi_finDT.rds")
+
+news.tri_finDT = copy(news.triDT7)
+setorder(news.tri_finDT, bigram, -p)
+setkey(news.tri_finDT, bigram)
+saveRDS(news.tri_finDT, "./finalDTs/news.tri_finDT.rds")
+
+news.tetra_finDT = copy(news.tetraDT7)
+setorder(news.tetra_finDT, trigram, -p)
+setkey(news.tetra_finDT, trigram)
+saveRDS(news.tetra_finDT, "./finalDTs/news.tetra_finDT.rds")
+
+# Tweets
+tweets.bi_finDT = copy(tweets.biDT7)
+setorder(tweets.bi_finDT, gram, -p)
+setkey(tweets.bi_finDT, gram)
+saveRDS(tweets.bi_finDT, "./finalDTs/tweets.bi_finDT.rds")
+
+tweets.tri_finDT = copy(tweets.triDT7)
+setorder(tweets.tri_finDT, bigram, -p)
+setkey(tweets.tri_finDT, bigram)
+saveRDS(tweets.tri_finDT, "./finalDTs/tweets.tri_finDT.rds")
+
+tweets.tetra_finDT = copy(tweets.tetraDT7)
+setorder(tweets.tetra_finDT, trigram, -p)
+setkey(tweets.tetra_finDT, trigram)
+saveRDS(tweets.tetra_finDT, "./finalDTs/tweets.tetra_finDT.rds")
+
+```
+
+To test the effectiveness of an interpolation approach, we multiply these maximum likelihood estimates by a lambda weight (remember to insert lambda optimization here. 
+
+
+```{r produce ngrams with lambda weights}
+
+# Bigrams
+blogs.bi_finDTlin <- blogs.bi_finDT[,plin := p * .06]; blogs.bi_finDTlin[,3:=NULL]
+news.bi_finDTlin <- news.bi_finDT[,plin := p * .06]; news.bi_finDTlin[,3:=NULL]
+tweets.bi_finDTlin <- tweets.bi_finDT[,plin := p * .06]; tweets.bi_finDTlin[,3:=NULL]
+
+# Trigrams
+blogs.tri_finDTlin <- blogs.tri_finDT[,plin := p * .23]; blogs.tri_finDTlin[,3:=NULL]
+news.tri_finDTlin <- news.tri_finDT[,plin := p * .23]; news.tri_finDTlin[,3:=NULL]
+tweets.tri_finDTlin <- tweets.tri_finDT[,plin := p * .23]; tweets.tri_finDTlin[,3:=NULL]
+
+# Tetragrams
+blogs.tetra_finDTlin <- blogs.tetra_finDT[,plin := p * .71]; blogs.tetra_finDTlin[,3:=NULL]
+news.tetra_finDTlin <- news.tetra_finDT[,plin := p * .71]; news.tetra_finDTlin[,3:=NULL]
+tweets.tetra_finDTlin <- tweets.tetra_finDT[,plin := p * .71]; tweets.tetra_finDTlin[,3:=NULL]
+
+```
+
+
+# Modeling and Prediction
+
+Having derived our n-grams, we start to build a model for text prediction. In this case, we will combine a backoff approach with a linear interpolation model (one more sentence about why this kind of model, then give a reference).
+
+To begin with, we test out our approach on strings derived from the course's quizzes. 
+
+
+```{r first pass at lookup}
+
+### This will have come in from Shiny app
+test.string <- "The guy in front of me just bought a pound of bacon, a bouquet, and a case of"
+
+### Assume user has selected "blogs", "news" or "twitter"
+corpus.type <- "tweets"
+
+
+# Clean test.string using same steps as w/ the corpus
+profanity_list <- readLines("http://www.bannedwordlist.com/lists/swearWords.txt", warn = FALSE)
+
+test.string.1 <-tolower(test.string); test.string.2 <- str_replace_all(test.string.1, "[^[:alnum:][:space:]'|’]", ""); test.string.3 <- iconv(test.string.2, from="UTF-8", to="ascii", sub=""); test.string.4 <- iconv(test.string.3, to="ASCII//TRANSLIT"); test.string.5 <- str_replace_all(test.string.4, "[[:digit:]]+", ""); test.string.6 <- str_replace_all(test.string.5, paste(profanity_list, collapse = "|"), replacement = "")
+test.string.7 <- strsplit(test.string.6, " ")
+
+# Clean up
+rm(test.string); rm(test.string.1); rm(test.string.2); rm(test.string.3); rm(test.string.4); rm(test.string.5); rm(test.string.6)
+
+
+# Create ngrams for lookup
+test.string_gram4 <- sapply(test.string.7, tail, 3); test.string_gram4.gram <- test.string_gram4[1:3, ]; test.string_gram4.gram <- as.character(paste(test.string_gram4.gram, collapse = " "))
+
+test.string_gram3 <- sapply(test.string.7, tail, 2); test.string_gram3.gram <- test.string_gram3[1:2, ]; test.string_gram3.gram <- as.character(paste(test.string_gram3.gram, collapse = " "))
+
+test.string_gram2 <- sapply(test.string.7, tail, 1)
+
+
+## Look-up in blogs
+setkey(blogs.tetraDT7); blogs.tetra_test <- blogs.tetraDT7[list(test.string_gram4.gram)][1]; blogs.tetra_test$p[is.na(blogs.tetra_test$p)] <- 0
+setkey(blogs.triDT7); blogs.tri_test <- blogs.triDT7[list(test.string_gram3.gram)][1]; blogs.tri_test$p[is.na(blogs.tri_test$p)] <- 0
+setkey(blogs.biDT7); blogs.bi_test <- blogs.biDT7[list(test.string_gram2)][1]; blogs.bi_test$p[is.na(blogs.bi_test$p)] <- 0
+
+blogs.tetra_lambda <- (1/3)
+blogs.tri_lambda <- (1/3)
+blogs.bi_lambda <- (1/3)
+
+blogs_ps <- c((blogs.tetra_test$p * blogs.tetra_lambda), (blogs.tri_test$p * blogs.tri_lambda), (blogs.bi_test$p * blogs.bi_lambda))
+blogs_targets <- c(blogs.tetra_test$target, blogs.tri_test$target, blogs.bi_test$target)
+
+blogs_targetDF <- data.frame(blogs_ps, blogs_targets); blogs_target <- as.character(with(blogs_targetDF, blogs_targets[blogs_ps== max(blogs_ps)]))
+
+print(blogs_target)
+
+# Clean up
+rm(test.string_gram4); rm(test.string_gram4.gram); rm(test.string_gram3); rm(test.string_gram3.gram); rm(test.string_gram2)
+rm(blogs.tetra_test); rm(blogs.tri_test); rm(blogs.bi_test)
+rm(blogs.bi_lambda); rm(blogs.tri_lambda); rm(blogs.tetra_lambda)
+rm(blogs_ps); rm(blogs_targets); rm(blogs_targetDF); rm(blogs_target)
+
+
+## Look-up in news
+setkey(news.tetraDT7); news.tetra_test <- news.tetraDT7[list(test.string_gram4.gram)][1]; news.tetra_test$p[is.na(news.tetra_test$p)] <- 0
+setkey(news.triDT7); news.tri_test <- news.triDT7[list(test.string_gram3.gram)][1]; news.tri_test$p[is.na(news.tri_test$p)] <- 0
+setkey(news.biDT7); news.bi_test <- news.biDT7[list(test.string_gram2)][1]; news.bi_test$p[is.na(news.bi_test$p)] <- 0
+
+news.tetra_lambda <- (1/3)
+news.tri_lambda <- (1/3)
+news.bi_lambda <- (1/3)
+
+news_ps <- c((news.tetra_test$p * news.tetra_lambda), (news.tri_test$p * news.tri_lambda), (news.bi_test$p * news.bi_lambda))
+news_targets <- c(news.tetra_test$target, news.tri_test$target, news.bi_test$target)
+
+news_targetDF <- data.frame(news_ps, news_targets); news_target <- as.character(with(news_targetDF, news_targets[news_ps== max(news_ps)]))
+
+print(news_target)
+
+# Clean up
+rm(test.string_gram4); rm(test.string_gram4.gram); rm(test.string_gram3); rm(test.string_gram3.gram); rm(test.string_gram2)
+rm(news.tetra_test); rm(news.tri_test); rm(news.bi_test)
+rm(news.bi_lambda); rm(news.tri_lambda); rm(news.tetra_lambda)
+rm(news_ps); rm(news_targets); rm(news_targetDF); rm(news_target)
+
+
+## Look-up in tweets
+setkey(tweets.tetraDT7); tweets.tetra_test <- tweets.tetraDT7[list(test.string_gram4.gram)][1]; tweets.tetra_test$p[is.na(tweets.tetra_test$p)] <- 0
+setkey(tweets.triDT7); tweets.tri_test <- tweets.triDT7[list(test.string_gram3.gram)][1]; tweets.tri_test$p[is.na(tweets.tri_test$p)] <- 0
+setkey(tweets.biDT7); tweets.bi_test <- tweets.biDT7[list(test.string_gram2)][1]; tweets.bi_test$p[is.na(tweets.bi_test$p)] <- 0
+
+tweets.tetra_lambda <- (1/3)
+tweets.tri_lambda <- (1/3)
+tweets.bi_lambda <- (1/3)
+
+tweets_ps <- c((tweets.tetra_test$p * tweets.tetra_lambda), (tweets.tri_test$p * tweets.tri_lambda), (tweets.bi_test$p * tweets.bi_lambda))
+tweets_targets <- c(tweets.tetra_test$target, tweets.tri_test$target, tweets.bi_test$target)
+
+tweets_targetDF <- data.frame(tweets_ps, tweets_targets); tweets_target <- as.character(with(tweets_targetDF, tweets_targets[tweets_ps== max(tweets_ps)]))
+
+print(tweets_target)
+
+# Clean up
+rm(test.string_gram4); rm(test.string_gram4.gram); rm(test.string_gram3); rm(test.string_gram3.gram); rm(test.string_gram2)
+rm(tweets.tetra_test); rm(tweets.tri_test); rm(tweets.bi_test)
+rm(tweets.bi_lambda); rm(tweets.tri_lambda); rm(tweets.tetra_lambda)
+rm(tweets_ps); rm(tweets_targets); rm(tweets_targetDF); rm(tweets_target)
+
+```
+
+The correct answers for the first three questions ("beer", "world", "happiest") are given by the Twitter model. Satisfied that this is a decent first go at the model, we test the model more extensively using our "validation" data. First we read back in our validation data, cleaning it as we will the incoming text in the Shiny app. 
+
+```{r read in and clean validation data}
+
+# Read validation data back in
+blogs.val <- readLines("./validation/blogs.validation.txt")
+news.val <- readLines("./validation/news.validation.txt")
+tweets.val <- readLines("./validation/tweets.validation.txt")
+
+# Process as with corpus data / as will be done in shiny app input
+profanity_list <- readLines("http://www.bannedwordlist.com/lists/swearWords.txt", warn = FALSE)
+
+## Blogs
+blogs.val.1 <- tolower(blogs.val)
+blogs.val.2 <- str_replace_all(blogs.val.1, "[^[:alnum:][:space:]'|’]", ""); blogs.val.2 <- iconv(blogs.val.2, from="UTF-8", to="ascii", sub=""); blogs.val.2 <- iconv(blogs.val.2, to="ASCII//TRANSLIT")
+blogs.val.3 <- str_replace_all(blogs.val.2, "[[:digit:]]+", "")
+blogs.val.4 <- str_replace_all(blogs.val.3, paste(profanity_list, collapse = "|"), replacement = "")
+
+### Clean up
+rm(blogs.val); rm(blogs.val.1); rm(blogs.val.2); rm(blogs.val.3)
+
+## News
+news.val.1 <- tolower(news.val)
+news.val.2 <- str_replace_all(news.val.1, "[^[:alnum:][:space:]'|’]", ""); news.val.2 <- iconv(news.val.2, from="UTF-8", to="ascii", sub=""); news.val.2 <- iconv(news.val.2, to="ASCII//TRANSLIT")
+news.val.3 <- str_replace_all(news.val.2, "[[:digit:]]+", "")
+news.val.4 <- str_replace_all(news.val.3, paste(profanity_list, collapse = "|"), replacement = "")
+
+### Clean up
+rm(news.val); rm(news.val.1); rm(news.val.2); rm(news.val.3)
+
+## Tweets
+tweets.val.1 <- tolower(tweets.val)
+tweets.val.2 <- str_replace_all(tweets.val.1, "[^[:alnum:][:space:]'|’]", ""); tweets.val.2 <- iconv(tweets.val.2, from="UTF-8", to="ascii", sub=""); tweets.val.2 <- iconv(tweets.val.2, to="ASCII//TRANSLIT")
+tweets.val.3 <- str_replace_all(tweets.val.2, "[[:digit:]]+", "")
+tweets.val.4 <- str_replace_all(tweets.val.3, paste(profanity_list, collapse = "|"), replacement = "")
+
+### Clean up
+rm(tweets.val); rm(tweets.val.1); rm(tweets.val.2); rm(tweets.val.3)
+
+```
+
+Next we make n-grams from the validation data, then pre-process the data for look up. 
+
+```{r make and prepare ngrams from validation data}
+
+# Next make ngrams 
+source("Ngrams_tokenizer.R")
+
+bigram.tokenizer <- ngram_tokenizer(2)
+blogs.val_bi <- bigram.tokenizer(blogs.val.4); blogs.val_biDT <- as.data.table(blogs.val_bi)
+news.val_bi <- bigram.tokenizer(news.val.4); news.val_biDT <- as.data.table(news.val_bi)
+tweets.val_bi <- bigram.tokenizer(tweets.val.4); tweets.val_biDT <- as.data.table(tweets.val_bi)
+
+trigram.tokenizer <- ngram_tokenizer(3)
+blogs.val_tri <- trigram.tokenizer(blogs.val.4); blogs.val_triDT <- as.data.table(blogs.val_tri)
+news.val_tri <- trigram.tokenizer(news.val.4); news.val_triDT <- as.data.table(news.val_tri)
+tweets.val_tri <- trigram.tokenizer(tweets.val.4); tweets.val_triDT <- as.data.table(tweets.val_tri)
+
+tetragram.tokenizer <- ngram_tokenizer(4)
+blogs.val_tetra <- tetragram.tokenizer(blogs.val.4); blogs.val_tetraDT <- as.data.table(blogs.val_tetra)
+news.val_tetra <- tetragram.tokenizer(news.val.4); news.val_tetraDT <- as.data.table(news.val_tetra)
+tweets.val_tetra <- tetragram.tokenizer(tweets.val.4); tweets.val_tetraDT <- as.data.table(tweets.val_tetra)
+
+## Clean up
+rm(ngram_tokenizer); rm(bigram.tokenizer); rm(trigram.tokenizer); rm(tetragram.tokenizer)
+rm(blogs.val.4); rm(news.val.4); rm(tweets.val.4)
+
+
+# Preprocess for look up
+## Blogs
+blogs.val_biDT <- unique(blogs.val_biDT)
+blogs.val_biDT1 <- blogs.val_biDT[, c("gram", "target") := tstrsplit(blogs.val_bi, " ", fixed=TRUE)]; blogs.val_biDT1[,1:=NULL]
+
+blogs.val_triDT <- unique(blogs.val_triDT)
+blogs.val_triDT1 <- blogs.val_triDT[, c("wi_2", "gram", "target") := tstrsplit(blogs.val_tri, " ", fixed=TRUE)]; blogs.val_triDT1[,1:=NULL]
+blogs.val_triDT2 <- blogs.val_triDT1[, bigram := paste(blogs.val_triDT1[,wi_2], blogs.val_triDT1[,gram], sep = " ")]
+blogs.val_triDT2[,c(1,2):=NULL]; setcolorder(blogs.val_triDT2, c("bigram", "target"))
+
+blogs.val_tetraDT <- unique(blogs.val_tetraDT)
+blogs.val_tetraDT1 <- blogs.val_tetraDT[, c("wi_3", "wi_2", "gram", "target") := tstrsplit(blogs.val_tetra, " ", fixed=TRUE)]; blogs.val_tetraDT1[,1:=NULL]
+blogs.val_tetraDT2 <- blogs.val_tetraDT1[, trigram := paste(blogs.val_tetraDT1[,wi_3], blogs.val_tetraDT1[,wi_2], blogs.val_tetraDT1[,gram], sep = " ")]
+blogs.val_tetraDT2[,c(1,2,3):=NULL]; setcolorder(blogs.val_tetraDT2, c("trigram", "target"))
+
+### Clean up
+rm(blogs.val_biDT)
+rm(blogs.val_triDT)
+rm(blogs.val_tetraDT)
+
+## News
+news.val_biDT <- unique(news.val_biDT)
+news.val_biDT1 <- news.val_biDT[, c("gram", "target") := tstrsplit(news.val_bi, " ", fixed=TRUE)]; news.val_biDT1[,1:=NULL]
+
+news.val_triDT <- unique(news.val_triDT)
+news.val_triDT1 <- news.val_triDT[, c("wi_2", "gram", "target") := tstrsplit(news.val_tri, " ", fixed=TRUE)]; news.val_triDT1[,1:=NULL]
+news.val_triDT2 <- news.val_triDT1[, bigram := paste(news.val_triDT1[,wi_2], news.val_triDT1[,gram], sep = " ")]
+news.val_triDT2[,c(1,2):=NULL]; setcolorder(news.val_triDT2, c("bigram", "target"))
+
+news.val_tetraDT <- unique(news.val_tetraDT)
+news.val_tetraDT1 <- news.val_tetraDT[, c("wi_3", "wi_2", "gram", "target") := tstrsplit(news.val_tetra, " ", fixed=TRUE)]; news.val_tetraDT1[,1:=NULL]
+news.val_tetraDT2 <- news.val_tetraDT1[, trigram := paste(news.val_tetraDT1[,wi_3], news.val_tetraDT1[,wi_2], news.val_tetraDT1[,gram], sep = " ")]
+news.val_tetraDT2[,c(1,2,3):=NULL]; setcolorder(news.val_tetraDT2, c("trigram", "target"))
+
+### Clean up
+rm(news.val_biDT)
+rm(news.val_triDT)
+rm(news.val_tetraDT)
+
+
+## Tweets
+tweets.val_biDT <- unique(tweets.val_biDT)
+tweets.val_biDT1 <- tweets.val_biDT[, c("gram", "target") := tstrsplit(tweets.val_bi, " ", fixed=TRUE)]; tweets.val_biDT1[,1:=NULL]
+
+tweets.val_triDT <- unique(tweets.val_triDT)
+tweets.val_triDT1 <- tweets.val_triDT[, c("wi_2", "gram", "target") := tstrsplit(tweets.val_tri, " ", fixed=TRUE)]; tweets.val_triDT1[,1:=NULL]
+tweets.val_triDT2 <- tweets.val_triDT1[, bigram := paste(tweets.val_triDT1[,wi_2], tweets.val_triDT1[,gram], sep = " ")]
+tweets.val_triDT2[,c(1,2):=NULL]; setcolorder(tweets.val_triDT2, c("bigram", "target"))
+
+tweets.val_tetraDT <- unique(tweets.val_tetraDT)
+tweets.val_tetraDT1 <- tweets.val_tetraDT[, c("wi_3", "wi_2", "gram", "target") := tstrsplit(tweets.val_tetra, " ", fixed=TRUE)]; tweets.val_tetraDT1[,1:=NULL]
+tweets.val_tetraDT2 <- tweets.val_tetraDT1[, trigram := paste(tweets.val_tetraDT1[,wi_3], tweets.val_tetraDT1[,wi_2], tweets.val_tetraDT1[,gram], sep = " ")]
+tweets.val_tetraDT2[,c(1,2,3):=NULL]; setcolorder(tweets.val_tetraDT2, c("trigram", "target"))
+
+### Clean up
+rm(tweets.val_biDT)
+rm(tweets.val_triDT)
+rm(tweets.val_tetraDT)
+
+```
+
+Next, we put the validation n-grams through our backoff model.
+
+```{r validation of backoff model}
+
+# Blogs
+blogs.bi_finDT_LU <- blogs.bi_finDT[blogs.bi_finDT[, .I[p == max(p)], by =  gram]$V1]; blogs.bi_finDT_LU[,3 := NULL]
+blogs_bi.validation1 <- merge(blogs.bi_finDT_LU, blogs.val_biDT1, c("gram"))
+blogs_bi.validation2 <- blogs_bi.validation1[, match := ifelse(target.x == target.y, 1, 0)]
+blogs_bi.validation3 <- table(blogs_bi.validation2$match)
+
+blogs.tri_finDT_LU <- blogs.tri_finDT[blogs.tri_finDT[, .I[p == max(p)], by =  bigram]$V1]; blogs.tri_finDT_LU[,3 := NULL]
+blogs_tri.validation1 <- merge(blogs.tri_finDT_LU, blogs.val_triDT2, c("bigram"))
+blogs_tri.validation2 <- blogs_tri.validation1[, match := ifelse(target.x == target.y, 1, 0)]
+blogs_tri.validation3 <- table(blogs_tri.validation2$match)
+
+blogs.tetra_finDT_LU <- blogs.tetra_finDT[blogs.tetra_finDT[, .I[p == max(p)], by =  trigram]$V1]; blogs.tetra_finDT_LU[,3 := NULL]
+blogs_tetra.validation1 <- merge(blogs.tetra_finDT_LU, blogs.val_tetraDT2, c("trigram"))
+blogs_tetra.validation2 <- blogs_tetra.validation1[, match := ifelse(target.x == target.y, 1, 0)]
+blogs_tetra.validation3 <- table(blogs_tetra.validation2$match)
+
+
+# News
+news.bi_finDT_LU <- news.bi_finDT[news.bi_finDT[, .I[p == max(p)], by =  gram]$V1]; news.bi_finDT_LU[,3 := NULL]
+news_bi.validation1 <- merge(news.bi_finDT_LU, news.val_biDT1, c("gram"))
+news_bi.validation2 <- news_bi.validation1[, match := ifelse(target.x == target.y, 1, 0)]
+news_bi.validation3 <- table(news_bi.validation2$match)
+
+news.tri_finDT_LU <- news.tri_finDT[news.tri_finDT[, .I[p == max(p)], by =  bigram]$V1]; news.tri_finDT_LU[,3 := NULL]
+news_tri.validation1 <- merge(news.tri_finDT_LU, news.val_triDT2, c("bigram"))
+news_tri.validation2 <- news_tri.validation1[, match := ifelse(target.x == target.y, 1, 0)]
+news_tri.validation3 <- table(news_tri.validation2$match)
+
+news.tetra_finDT_LU <- news.tetra_finDT[news.tetra_finDT[, .I[p == max(p)], by =  trigram]$V1]; news.tetra_finDT_LU[,3 := NULL]
+news_tetra.validation1 <- merge(news.tetra_finDT_LU, news.val_tetraDT2, c("trigram"))
+news_tetra.validation2 <- news_tetra.validation1[, match := ifelse(target.x == target.y, 1, 0)]
+news_tetra.validation3 <- table(news_tetra.validation2$match)
+
+
+# Tweets
+tweets.bi_finDT_LU <- tweets.bi_finDT[tweets.bi_finDT[, .I[p == max(p)], by =  gram]$V1]; tweets.bi_finDT_LU[,3 := NULL]
+tweets_bi.validation1 <- merge(tweets.bi_finDT_LU, tweets.val_biDT1, c("gram"))
+tweets_bi.validation2 <- tweets_bi.validation1[, match := ifelse(target.x == target.y, 1, 0)]
+tweets_bi.validation3 <- table(tweets_bi.validation2$match)
+
+tweets.tri_finDT_LU <- tweets.tri_finDT[tweets.tri_finDT[, .I[p == max(p)], by =  bigram]$V1]; tweets.tri_finDT_LU[,3 := NULL]
+tweets_tri.validation1 <- merge(tweets.tri_finDT_LU, tweets.val_triDT2, c("bigram"))
+tweets_tri.validation2 <- tweets_tri.validation1[, match := ifelse(target.x == target.y, 1, 0)]
+tweets_tri.validation3 <- table(tweets_tri.validation2$match)
+
+tweets.tetra_finDT_LU <- tweets.tetra_finDT[tweets.tetra_finDT[, .I[p == max(p)], by =  trigram]$V1]; tweets.tetra_finDT_LU[,3 := NULL]
+tweets_tetra.validation1 <- merge(tweets.tetra_finDT_LU, tweets.val_tetraDT2, c("trigram"))
+tweets_tetra.validation2 <- tweets_tetra.validation1[, match := ifelse(target.x == target.y, 1, 0)]
+tweets_tetra.validation3 <- table(tweets_tetra.validation2$match)
+
+```
+
+Now we put the validation data through our linear interpolation model.
+
+```{r validation through linear interpolation}
+
+## Tetragrams
+### Blogs
+blogs.val_triDT2lin <- blogs.val_triDT2[, c("wi_2", "gram") := tstrsplit(blogs.val_triDT2$bigram, " ", fixed=TRUE)]
+blogs.val_triDT2lin[,1:=NULL]
+setcolorder(blogs.val_triDT2lin, c("wi_2", "gram", "target"))
+
+blogs.tri_finDTlin <- blogs.tri_finDTlin[, c("wi_2", "gram") := tstrsplit(blogs.tri_finDTlin$bigram, " ", fixed=TRUE)]
+blogs.tri_finDTlin[,1:=NULL]
+setcolorder(blogs.tri_finDTlin, c("wi_2", "gram", "target", "plin"))
+
+blogs.val_tetraDT2lin <- blogs.val_tetraDT2[, c("wi_3", "wi_2", "gram") := tstrsplit(blogs.val_tetraDT2$trigram, " ", fixed=TRUE)]
+blogs.val_tetraDT2lin[,1:=NULL]
+setcolorder(blogs.val_tetraDT2lin, c("wi_3", "wi_2", "gram", "target"))
+
+blogs.tetra_finDTlin <- blogs.tetra_finDTlin[, c("wi_3", "wi_2", "gram") := tstrsplit(blogs.tetra_finDTlin$trigram, " ", fixed=TRUE)]
+blogs.tetra_finDTlin[,1:=NULL]
+setcolorder(blogs.tetra_finDTlin, c("wi_3", "wi_2", "gram", "target", "plin"))
+
+# get plins from reference tables
+blogs_val_bifortetra.lin <- blogs.val_tetraDT2lin[, .(gram, target)]
+setkey(blogs.bi_finDTlin); setkey(blogs_val_bifortetra.lin)
+blogs_val_bifortetra.lin2 <- blogs.bi_finDTlin[blogs_val_bifortetra.lin, nomatch = NA]
+blogs_val_bifortetra.lin2[is.na(blogs_val_bifortetra.lin2)] = 0 
+
+blogs_val_trifortetra.lin <- blogs.val_tetraDT2lin[, .(wi_2, gram, target)]
+setkey(blogs.tri_finDTlin); setkey(blogs_val_trifortetra.lin)
+blogs_val_trifortetra.lin2 <- blogs.tri_finDTlin[blogs_val_trifortetra.lin, nomatch = NA]
+blogs_val_trifortetra.lin2[is.na(blogs_val_trifortetra.lin2)] = 0 
+
+setkey(blogs.tetra_finDTlin); setkey(blogs.val_tetraDT2lin)
+blogs_val_tetrafortetra.lin2 <- blogs.tetra_finDTlin[blogs.val_tetraDT2lin, nomatch = NA]
+blogs_val_tetrafortetra.lin2[is.na(blogs_val_tetrafortetra.lin2)] = 0 
+
+blogs_val_tetrafortetra.lin2 <- blogs_val_tetrafortetra.lin2[, total.plin := blogs_val_bifortetra.lin2$plin + blogs_val_trifortetra.lin2$plin + blogs_val_tetrafortetra.lin2$plin]
+
+
+### News
+news.val_triDT2lin <- news.val_triDT2[, c("wi_2", "gram") := tstrsplit(news.val_triDT2$bigram, " ", fixed=TRUE)]
+news.val_triDT2lin[,1:=NULL]
+setcolorder(news.val_triDT2lin, c("wi_2", "gram", "target"))
+
+news.tri_finDTlin <- news.tri_finDTlin[, c("wi_2", "gram") := tstrsplit(news.tri_finDTlin$bigram, " ", fixed=TRUE)]
+news.tri_finDTlin[,1:=NULL]
+setcolorder(news.tri_finDTlin, c("wi_2", "gram", "target", "plin"))
+
+news.val_tetraDT2lin <- news.val_tetraDT2[, c("wi_3", "wi_2", "gram") := tstrsplit(news.val_tetraDT2$trigram, " ", fixed=TRUE)]
+news.val_tetraDT2lin[,1:=NULL]
+setcolorder(news.val_tetraDT2lin, c("wi_3", "wi_2", "gram", "target"))
+
+news.tetra_finDTlin <- news.tetra_finDTlin[, c("wi_3", "wi_2", "gram") := tstrsplit(news.tetra_finDTlin$trigram, " ", fixed=TRUE)]
+news.tetra_finDTlin[,1:=NULL]
+setcolorder(news.tetra_finDTlin, c("wi_3", "wi_2", "gram", "target", "plin"))
+
+# get plins from reference tables
+news_val_bifortetra.lin <- news.val_tetraDT2lin[, .(gram, target)]
+news_val_bifortetra.lin2 <- news.bi_finDTlin[news_val_bifortetra.lin, nomatch = NA]
+news_val_bifortetra.lin2[is.na(news_val_bifortetra.lin2)] = 0 
+
+news_val_trifortetra.lin <- news.val_tetraDT2lin[, .(wi_2, gram, target)]
+news_val_trifortetra.lin2 <- news.tri_finDTlin[news_val_trifortetra.lin, nomatch = NA]
+news_val_trifortetra.lin2[is.na(news_val_trifortetra.lin2)] = 0 
+
+news_val_tetrafortetra.lin2 <- news.tetra_finDTlin[news.val_tetraDT2lin, nomatch = NA]
+news_val_tetrafortetra.lin2[is.na(news_val_tetrafortetra.lin2)] = 0 
+
+news_val_tetrafortetra.lin2 <- news_val_tetrafortetra.lin2[, total.plin := news_val_bifortetra.lin2$plin + news_val_trifortetra.lin2$plin + news_val_tetrafortetra.lin2$plin]
+
+
+
+### Tweets
+tweets.val_triDT2lin <- tweets.val_triDT2[, c("wi_2", "gram") := tstrsplit(tweets.val_triDT2$bigram, " ", fixed=TRUE)]
+tweets.val_triDT2lin[,1:=NULL]
+setcolorder(tweets.val_triDT2lin, c("wi_2", "gram", "target"))
+
+tweets.tri_finDTlin <- tweets.tri_finDTlin[, c("wi_2", "gram") := tstrsplit(tweets.tri_finDTlin$bigram, " ", fixed=TRUE)]
+tweets.tri_finDTlin[,1:=NULL]
+setcolorder(tweets.tri_finDTlin, c("wi_2", "gram", "target", "plin"))
+
+tweets.val_tetraDT2lin <- tweets.val_tetraDT2[, c("wi_3", "wi_2", "gram") := tstrsplit(tweets.val_tetraDT2$trigram, " ", fixed=TRUE)]
+tweets.val_tetraDT2lin[,1:=NULL]
+setcolorder(tweets.val_tetraDT2lin, c("wi_3", "wi_2", "gram", "target"))
+
+tweets.tetra_finDTlin <- tweets.tetra_finDTlin[, c("wi_3", "wi_2", "gram") := tstrsplit(tweets.tetra_finDTlin$trigram, " ", fixed=TRUE)]
+tweets.tetra_finDTlin[,1:=NULL]
+setcolorder(tweets.tetra_finDTlin, c("wi_3", "wi_2", "gram", "target", "plin"))
+
+# get plins from reference tables
+tweets_val_bifortetra.lin <- tweets.val_tetraDT2lin[, .(gram, target)]
+tweets_val_bifortetra.lin2 <- tweets.bi_finDTlin[tweets_val_bifortetra.lin, nomatch = NA]
+tweets_val_bifortetra.lin2[is.na(tweets_val_bifortetra.lin2)] = 0 
+
+tweets_val_trifortetra.lin <- tweets.val_tetraDT2lin[, .(wi_2, gram, target)]
+tweets_val_trifortetra.lin2 <- tweets.tri_finDTlin[tweets_val_trifortetra.lin, nomatch = NA]
+tweets_val_trifortetra.lin2[is.na(tweets_val_trifortetra.lin2)] = 0 
+
+tweets_val_tetrafortetra.lin2 <- tweets.tetra_finDTlin[tweets.val_tetraDT2lin, nomatch = NA]
+tweets_val_tetrafortetra.lin2[is.na(tweets_val_tetrafortetra.lin2)] = 0 
+
+tweets_val_tetrafortetra.lin2 <- tweets_val_tetrafortetra.lin2[, total.plin := tweets_val_bifortetra.lin2$plin + tweets_val_trifortetra.lin2$plin + tweets_val_tetrafortetra.lin2$plin]
+
+
+
+## Trigrams
+
+### Blogs
+blogs_val_bifortri.lin <- blogs.val_triDT2lin[, .(gram, target)]
+blogs_val_bifortri.lin2 <- blogs.bi_finDTlin[blogs_val_bifortri.lin, nomatch = NA]
+blogs_val_bifortri.lin2[is.na(blogs_val_bifortri.lin2)] = 0 
+
+blogs_val_trifortri.lin2 <- blogs.tri_finDTlin[blogs.tri_finDTlin, nomatch = NA]
+blogs_val_trifortri.lin2[is.na(blogs_val_trifortri.lin2)] = 0 
+
+blogs_val_trifortri.lin2 <- blogs_val_trifortri.lin2[, total.plin := blogs_val_bifortri.lin2$plin + blogs_val_trifortri.lin2$plin]
+
+
+### News
+news_val_bifortri.lin <- news.val_triDT2lin[, .(gram, target)]
+news_val_bifortri.lin2 <- news.bi_finDTlin[news_val_bifortri.lin, nomatch = NA]
+news_val_bifortri.lin2[is.na(news_val_bifortri.lin2)] = 0 
+
+news_val_trifortri.lin2 <- news.tri_finDTlin[news.tri_finDTlin, nomatch = NA]
+news_val_trifortri.lin2[is.na(news_val_trifortri.lin2)] = 0 
+
+news_val_trifortri.lin2 <- news_val_trifortri.lin2[, total.plin := news_val_bifortri.lin2$plin + news_val_trifortri.lin2$plin]
+
+
+### Tweets
+# get plins from reference tables
+tweets_val_bifortri.lin <- tweets.val_triDT2lin[, .(gram, target)]
+tweets_val_bifortri.lin2 <- tweets.bi_finDTlin[tweets_val_bifortri.lin, nomatch = NA]
+tweets_val_bifortri.lin2[is.na(tweets_val_bifortri.lin2)] = 0 
+
+tweets_val_trifortri.lin2 <- tweets.tri_finDTlin[tweets.tri_finDTlin, nomatch = NA]
+tweets_val_trifortri.lin2[is.na(tweets_val_trifortri.lin2)] = 0 
+
+tweets_val_trifortri.lin2 <- tweets_val_trifortri.lin2[, total.plin := tweets_val_bifortri.lin2$plin + tweets_val_trifortri.lin2$plin]
+
+```
+
+Testing our validation data with the linear interpolation approach, we see that it achieves very similar results to that of the back-off. It also involves more operations and, as such, is much slower. For example, testing the tetragram validation data with linear interpolation took nearly 3 times as many commands. These results are corroborated by the feedback of my classmates in the Coursera Data Science specialization.
+
+Given the clear advantages of the backoff approach, we stick with that here. To finalize our accuracy statistics, we put this test data through the same procedure as our validation data testing with back-off. We then report on final in-sample accuracy estimations.
+
+```{r test data}
+# Read testidation data back in
+blogs.test <- readLines("./test/blogs.test.txt")
+news.test <- readLines("./test/news.test.txt")
+tweets.test <- readLines("./test/tweets.test.txt")
+
+# Process as with corpus data / as will be done in shiny app input
+profanity_list <- readLines("http://www.bannedwordlist.com/lists/swearWords.txt", warn = FALSE)
+
+## Blogs
+blogs.test.1 <- tolower(blogs.test)
+blogs.test.2 <- str_replace_all(blogs.test.1, "[^[:alnum:][:space:]'|’]", ""); blogs.test.2 <- iconv(blogs.test.2, from="UTF-8", to="ascii", sub=""); blogs.test.2 <- iconv(blogs.test.2, to="ASCII//TRANSLIT")
+blogs.test.3 <- str_replace_all(blogs.test.2, "[[:digit:]]+", "")
+blogs.test.4 <- str_replace_all(blogs.test.3, paste(profanity_list, collapse = "|"), replacement = "")
+
+### Clean up
+rm(blogs.test); rm(blogs.test.1); rm(blogs.test.2); rm(blogs.test.3)
+
+## News
+news.test.1 <- tolower(news.test)
+news.test.2 <- str_replace_all(news.test.1, "[^[:alnum:][:space:]'|’]", ""); news.test.2 <- iconv(news.test.2, from="UTF-8", to="ascii", sub=""); news.test.2 <- iconv(news.test.2, to="ASCII//TRANSLIT")
+news.test.3 <- str_replace_all(news.test.2, "[[:digit:]]+", "")
+news.test.4 <- str_replace_all(news.test.3, paste(profanity_list, collapse = "|"), replacement = "")
+
+### Clean up
+rm(news.test); rm(news.test.1); rm(news.test.2); rm(news.test.3)
+
+## Tweets
+tweets.test.1 <- tolower(tweets.test)
+tweets.test.2 <- str_replace_all(tweets.test.1, "[^[:alnum:][:space:]'|’]", ""); tweets.test.2 <- iconv(tweets.test.2, from="UTF-8", to="ascii", sub=""); tweets.test.2 <- iconv(tweets.test.2, to="ASCII//TRANSLIT")
+tweets.test.3 <- str_replace_all(tweets.test.2, "[[:digit:]]+", "")
+tweets.test.4 <- str_replace_all(tweets.test.3, paste(profanity_list, collapse = "|"), replacement = "")
+
+### Clean up
+rm(tweets.test); rm(tweets.test.1); rm(tweets.test.2); rm(tweets.test.3)
+
+```
+
+We then make n-grams of our test data and pre-process it like we will our incoming strings in the Shiny app.
+
+```{r make and prepare ngrams from testidation data}
+
+# Next make ngrams 
+source("Ngrams_tokenizer.R")
+
+bigram.tokenizer <- ngram_tokenizer(2)
+blogs.test_bi <- bigram.tokenizer(blogs.test.4); blogs.test_biDT <- as.data.table(blogs.test_bi)
+news.test_bi <- bigram.tokenizer(news.test.4); news.test_biDT <- as.data.table(news.test_bi)
+tweets.test_bi <- bigram.tokenizer(tweets.test.4); tweets.test_biDT <- as.data.table(tweets.test_bi)
+
+trigram.tokenizer <- ngram_tokenizer(3)
+blogs.test_tri <- trigram.tokenizer(blogs.test.4); blogs.test_triDT <- as.data.table(blogs.test_tri)
+news.test_tri <- trigram.tokenizer(news.test.4); news.test_triDT <- as.data.table(news.test_tri)
+tweets.test_tri <- trigram.tokenizer(tweets.test.4); tweets.test_triDT <- as.data.table(tweets.test_tri)
+
+tetragram.tokenizer <- ngram_tokenizer(4)
+blogs.test_tetra <- tetragram.tokenizer(blogs.test.4); blogs.test_tetraDT <- as.data.table(blogs.test_tetra)
+news.test_tetra <- tetragram.tokenizer(news.test.4); news.test_tetraDT <- as.data.table(news.test_tetra)
+tweets.test_tetra <- tetragram.tokenizer(tweets.test.4); tweets.test_tetraDT <- as.data.table(tweets.test_tetra)
+
+## Clean up
+rm(ngram_tokenizer); rm(bigram.tokenizer); rm(trigram.tokenizer); rm(tetragram.tokenizer)
+rm(blogs.test.4); rm(news.test.4); rm(tweets.test.4)
+
+
+# Preprocess for look up
+## Blogs
+blogs.test_biDT <- unique(blogs.test_biDT)
+blogs.test_biDT1 <- blogs.test_biDT[, c("gram", "target") := tstrsplit(blogs.test_bi, " ", fixed=TRUE)]; blogs.test_biDT1[,1:=NULL]
+
+blogs.test_triDT <- unique(blogs.test_triDT)
+blogs.test_triDT1 <- blogs.test_triDT[, c("wi_2", "gram", "target") := tstrsplit(blogs.test_tri, " ", fixed=TRUE)]; blogs.test_triDT1[,1:=NULL]
+blogs.test_triDT2 <- blogs.test_triDT1[, bigram := paste(blogs.test_triDT1[,wi_2], blogs.test_triDT1[,gram], sep = " ")]
+blogs.test_triDT2[,c(1,2):=NULL]; setcolorder(blogs.test_triDT2, c("bigram", "target"))
+
+blogs.test_tetraDT <- unique(blogs.test_tetraDT)
+blogs.test_tetraDT1 <- blogs.test_tetraDT[, c("wi_3", "wi_2", "gram", "target") := tstrsplit(blogs.test_tetra, " ", fixed=TRUE)]; blogs.test_tetraDT1[,1:=NULL]
+blogs.test_tetraDT2 <- blogs.test_tetraDT1[, trigram := paste(blogs.test_tetraDT1[,wi_3], blogs.test_tetraDT1[,wi_2], blogs.test_tetraDT1[,gram], sep = " ")]
+blogs.test_tetraDT2[,c(1,2,3):=NULL]; setcolorder(blogs.test_tetraDT2, c("trigram", "target"))
+
+### Clean up
+rm(blogs.test_biDT)
+rm(blogs.test_triDT)
+rm(blogs.test_tetraDT)
+
+## News
+news.test_biDT <- unique(news.test_biDT)
+news.test_biDT1 <- news.test_biDT[, c("gram", "target") := tstrsplit(news.test_bi, " ", fixed=TRUE)]; news.test_biDT1[,1:=NULL]
+
+news.test_triDT <- unique(news.test_triDT)
+news.test_triDT1 <- news.test_triDT[, c("wi_2", "gram", "target") := tstrsplit(news.test_tri, " ", fixed=TRUE)]; news.test_triDT1[,1:=NULL]
+news.test_triDT2 <- news.test_triDT1[, bigram := paste(news.test_triDT1[,wi_2], news.test_triDT1[,gram], sep = " ")]
+news.test_triDT2[,c(1,2):=NULL]; setcolorder(news.test_triDT2, c("bigram", "target"))
+
+news.test_tetraDT <- unique(news.test_tetraDT)
+news.test_tetraDT1 <- news.test_tetraDT[, c("wi_3", "wi_2", "gram", "target") := tstrsplit(news.test_tetra, " ", fixed=TRUE)]; news.test_tetraDT1[,1:=NULL]
+news.test_tetraDT2 <- news.test_tetraDT1[, trigram := paste(news.test_tetraDT1[,wi_3], news.test_tetraDT1[,wi_2], news.test_tetraDT1[,gram], sep = " ")]
+news.test_tetraDT2[,c(1,2,3):=NULL]; setcolorder(news.test_tetraDT2, c("trigram", "target"))
+
+### Clean up
+rm(news.test_biDT)
+rm(news.test_triDT)
+rm(news.test_tetraDT)
+
+
+## Tweets
+tweets.test_biDT <- unique(tweets.test_biDT)
+tweets.test_biDT1 <- tweets.test_biDT[, c("gram", "target") := tstrsplit(tweets.test_bi, " ", fixed=TRUE)]; tweets.test_biDT1[,1:=NULL]
+
+tweets.test_triDT <- unique(tweets.test_triDT)
+tweets.test_triDT1 <- tweets.test_triDT[, c("wi_2", "gram", "target") := tstrsplit(tweets.test_tri, " ", fixed=TRUE)]; tweets.test_triDT1[,1:=NULL]
+tweets.test_triDT2 <- tweets.test_triDT1[, bigram := paste(tweets.test_triDT1[,wi_2], tweets.test_triDT1[,gram], sep = " ")]
+tweets.test_triDT2[,c(1,2):=NULL]; setcolorder(tweets.test_triDT2, c("bigram", "target"))
+
+tweets.test_tetraDT <- unique(tweets.test_tetraDT)
+tweets.test_tetraDT1 <- tweets.test_tetraDT[, c("wi_3", "wi_2", "gram", "target") := tstrsplit(tweets.test_tetra, " ", fixed=TRUE)]; tweets.test_tetraDT1[,1:=NULL]
+tweets.test_tetraDT2 <- tweets.test_tetraDT1[, trigram := paste(tweets.test_tetraDT1[,wi_3], tweets.test_tetraDT1[,wi_2], tweets.test_tetraDT1[,gram], sep = " ")]
+tweets.test_tetraDT2[,c(1,2,3):=NULL]; setcolorder(tweets.test_tetraDT2, c("trigram", "target"))
+
+### Clean up
+rm(tweets.test_biDT)
+rm(tweets.test_triDT)
+rm(tweets.test_tetraDT)
+
+```
+
+Finally, we move on to actually testing it using our preferred back-off approach
+
+```{r test data lookup}
+# Blogs
+blogs.bi_finDT_test <- blogs.bi_finDT[blogs.bi_finDT[, .I[p == max(p)], by =  gram]$V1]; blogs.bi_finDT_test[,3 := NULL]
+blogs_bi.test1 <- merge(blogs.bi_finDT_test, blogs.test_biDT1, c("gram"))
+blogs_bi.test2 <- blogs_bi.test1[, match := ifelse(target.x == target.y, 1, 0)]
+blogs_bi.test3 <- table(blogs_bi.test2$match)
+
+blogs.tri_finDT_test <- blogs.tri_finDT[blogs.tri_finDT[, .I[p == max(p)], by =  bigram]$V1]; blogs.tri_finDT_test[,3 := NULL]
+blogs_tri.test1 <- merge(blogs.tri_finDT_test, blogs.test_triDT2, c("bigram"))
+blogs_tri.test2 <- blogs_tri.test1[, match := ifelse(target.x == target.y, 1, 0)]
+blogs_tri.test3 <- table(blogs_tri.test2$match)
+
+blogs.tetra_finDT_test <- blogs.tetra_finDT[blogs.tetra_finDT[, .I[p == max(p)], by =  trigram]$V1]; blogs.tetra_finDT_test[,3 := NULL]
+blogs_tetra.test1 <- merge(blogs.tetra_finDT_test, blogs.test_tetraDT2, c("trigram"))
+blogs_tetra.test2 <- blogs_tetra.test1[, match := ifelse(target.x == target.y, 1, 0)]
+blogs_tetra.test3 <- table(blogs_tetra.test2$match)
+
+
+# News
+news.bi_finDT_test <- news.bi_finDT[news.bi_finDT[, .I[p == max(p)], by =  gram]$V1]; news.bi_finDT_test[,3 := NULL]
+news_bi.test1 <- merge(news.bi_finDT_test, news.test_biDT1, c("gram"))
+news_bi.test2 <- news_bi.test1[, match := ifelse(target.x == target.y, 1, 0)]
+news_bi.test3 <- table(news_bi.test2$match)
+
+news.tri_finDT_test <- news.tri_finDT[news.tri_finDT[, .I[p == max(p)], by =  bigram]$V1]; news.tri_finDT_test[,3 := NULL]
+news_tri.test1 <- merge(news.tri_finDT_test, news.test_triDT2, c("bigram"))
+news_tri.test2 <- news_tri.test1[, match := ifelse(target.x == target.y, 1, 0)]
+news_tri.test3 <- table(news_tri.test2$match)
+
+news.tetra_finDT_test <- news.tetra_finDT[news.tetra_finDT[, .I[p == max(p)], by =  trigram]$V1]; news.tetra_finDT_test[,3 := NULL]
+news_tetra.test1 <- merge(news.tetra_finDT_test, news.test_tetraDT2, c("trigram"))
+news_tetra.test2 <- news_tetra.test1[, match := ifelse(target.x == target.y, 1, 0)]
+news_tetra.test3 <- table(news_tetra.test2$match)
+
+
+# Tweets
+tweets.bi_finDT_test <- tweets.bi_finDT[tweets.bi_finDT[, .I[p == max(p)], by =  gram]$V1]; tweets.bi_finDT_test[,3 := NULL]
+tweets_bi.test1 <- merge(tweets.bi_finDT_test, tweets.test_biDT1, c("gram"))
+tweets_bi.test2 <- tweets_bi.test1[, match := ifelse(target.x == target.y, 1, 0)]
+tweets_bi.test3 <- table(tweets_bi.test2$match)
+
+tweets.tri_finDT_test <- tweets.tri_finDT[tweets.tri_finDT[, .I[p == max(p)], by =  bigram]$V1]; tweets.tri_finDT_test[,3 := NULL]
+tweets_tri.test1 <- merge(tweets.tri_finDT_test, tweets.test_triDT2, c("bigram"))
+tweets_tri.test2 <- tweets_tri.test1[, match := ifelse(target.x == target.y, 1, 0)]
+tweets_tri.test3 <- table(tweets_tri.test2$match)
+
+tweets.tetra_finDT_test <- tweets.tetra_finDT[tweets.tetra_finDT[, .I[p == max(p)], by =  trigram]$V1]; tweets.tetra_finDT_test[,3 := NULL]
+tweets_tetra.test1 <- merge(tweets.tetra_finDT_test, tweets.test_tetraDT2, c("trigram"))
+tweets_tetra.test2 <- tweets_tetra.test1[, match := ifelse(target.x == target.y, 1, 0)]
+tweets_tetra.test3 <- table(tweets_tetra.test2$match)
+
+```
+
+The test data show accuracy rates very similar to those of the in-sample validation data. Bigram accuracy was 1.2%, 1.34% and 1.1% for blogs, news and tweets corpora, respectively. Mean trigram accuracy was 7.63% and tetragram accuracy was highest for the news corpus (17.84%). 
+
+Next we move on to constructing the our Shiny app.
+
+## App Building
+
+First, we turn to building our user interface (ui.R).
+
+```{r Shiny app-- ui.R}
+
+library(shiny)
+
+shinyUI(fluidPage(theme = "bootstrap.css",
+  titlePanel("Predict-a-word"),
+  br(),
+  sidebarLayout(
+    sidebarPanel(
+      h4("Type a sentence, minus the last word.", align = "center", style = "font-family: 'sans serif'; color:cornflowerblue"),
+      br(),
+      radioButtons("corpus", "This is for a",
+                  c("blog." = "blogs", 
+                    "news story." = "news",
+                    "tweet." = "tweets")),
+      textInput("stub", ""),
+      actionButton("submission", "Get next word!")),
+    mainPanel(
+      tabsetPanel(
+        tabPanel('Prediction!',
+       br(),
+       br(),
+       p(''),
+       img(src = "fortune-cookie-575751_1280.png", height = 130, width = 150, align = "center")),
+       h3(textOutput("prediction"),
+       br()),
+       tabPanel('Background',
+       h4(em("Change text type to get a new word and refresh to start over.", align = "center")),
+       br(),
+       h5('This application uses a model trained on text corpora drawn from blogs, news and tweets to predict a word based on context.'),
+       br(),
+       p(""),
+       p("* The app was built as part of the Capstone project in the ",
+         a("Coursera Data Science certificate.", 
+           href = "https://www.coursera.org/specialization/jhudatascience/1")),
+       p("* The project was undertaken in cooperation with ",
+         a("Swiftkey.", 
+           href = "http://swiftkey.com/en/")))
+       
+    )))))
+
+```
+
+
+Next, we build our server-side R script (server.R).
+
+```{r Shiny app-- server.R}
+
+library(shiny); library(stringr); library(data.table)
+profanity_list <- readLines("http://www.bannedwordlist.com/lists/swearWords.txt", warn = FALSE)
+
+# load in lookup tables
+blogs.bi_finDT <- readRDS("data/blogs.bi_finDT.rds")
+blogs.tri_finDT <- readRDS("data/blogs.tri_finDT.rds")
+blogs.tetra_finDT <- readRDS("data/blogs.tetra_finDT.rds")
+
+news.bi_finDT <- readRDS("data/news.bi_finDT.rds")
+news.tri_finDT <- readRDS("data/news.tri_finDT.rds")
+news.tetra_finDT <- readRDS("data/news.tetra_finDT.rds")
+
+tweets.bi_finDT <- readRDS("data/tweets.bi_finDT.rds")
+tweets.tri_finDT <- readRDS("data/tweets.tri_finDT.rds")
+tweets.tetra_finDT <- readRDS("data/tweets.tetra_finDT.rds")
+
+
+# Lookup and isolate highest possible n-gram from lookup
+lookup <- function (corpus.type, string) {
+  if (corpus.type == "blogs") {lookup.blogs(string)
+                               if (exists("tetra.target")) {target <<- tetra.target
+                               } else if (exists("tri.target")) {target <<- tri.target
+                               } else if (exists("bi.target")) {target <<- bi.target
+                               }
+                            }
+                                   
+  if (corpus.type == "news") {lookup.news(string)
+                               if (exists("tetra.target")) {target <<- tetra.target
+                               } else if (exists("tri.target")) {target <<- tri.target
+                               } else if (exists("bi.target")) {target <<- bi.target
+                               }
+                            }
+                                     
+  if (corpus.type == "tweets") {lookup.tweets(string)
+                               if (exists("tetra.target")) {target <<- tetra.target
+                               } else if (exists("tri.target")) {target <<- tri.target
+                               } else if (exists("bi.target")) {target <<- bi.target
+                               }
+                            }
+                        }
+
+
+# Functions performing simple backoff lookup for largest possible n-gram stub
+## BLOGS
+lookup.blogs <- function(gram) {
+  gram.n <- length(strsplit(gram,' ')[[1]])
+  if (gram.n >= 3) {
+    tetra <- word(gram, -3:-1); tetra <- paste(tetra, collapse = ' ')
+    tetra <- blogs.tetra_finDT[tetra][1]
+    
+    tri <- word(gram, -2:-1); tri <- paste(tri, collapse = ' ')
+    tri <- blogs.tri_finDT[tri][1]
+    
+    bi <- word(gram, -1)
+    bi <- blogs.bi_finDT[bi][1]
+    
+    ifelse (!is.na(tetra$target), tetra.target <<- tetra$target, tetra.target <- tri$target)
+    ifelse (!is.na(tetra.target), tetra.target <<- tri$target, tetra.target <<- bi$target)
+  }
+  
+  if (gram.n == 2) {
+    tri <- word(gram, -2:-1); tri <- paste(tri, collapse = ' ')
+    tri <- blogs.tri_finDT[tri][1]
+    
+    bi <- word(gram, -1)
+    bi <- blogs.bi_finDT[bi][1]
+    
+    ifelse (!is.na(tri$target), tri.target <<- tri$target, tri.target <<- bi$target)
+  }
+  
+  if (gram.n == 1) {
+    bi <- blogs.bi_finDT[gram][1]
+    bi.target <<- bi$target
+  }
+}
+
+
+## NEWS
+lookup.news <- function(gram) {
+  gram.n <- length(strsplit(gram,' ')[[1]])
+  if (gram.n >= 3) {
+    tetra <- word(gram, -3:-1); tetra <- paste(tetra, collapse = ' ')
+    tetra <- news.tetra_finDT[tetra][1]
+    
+    tri <- word(gram, -2:-1); tri <- paste(tri, collapse = ' ')
+    tri <- news.tri_finDT[tri][1]
+    
+    bi <- word(gram, -1)
+    bi <- news.bi_finDT[bi][1]
+    
+    ifelse (!is.na(tetra$target), tetra.target <<- tetra$target, tetra.target <- tri$target)
+    ifelse (!is.na(tetra.target), tetra.target <<- tri$target, tetra.target <<- bi$target)
+  }
+  
+  if (gram.n == 2) {
+    tri <- word(gram, -2:-1); tri <- paste(tri, collapse = ' ')
+    tri <- news.tri_finDT[tri][1]
+    
+    bi <- word(gram, -1)
+    bi <- news.bi_finDT[bi][1]
+    
+    ifelse (!is.na(tri$target), tri.target <<- tri$target, tri.target <<- bi$target)
+  }
+  
+  if (gram.n == 1) {
+    bi <- news.bi_finDT[gram][1]
+    bi.target <<- bi$target
+  }
+}
+
+
+## TWEETS
+lookup.tweets <- function(gram) {
+  gram.n <- length(strsplit(gram,' ')[[1]])
+  if (gram.n >= 3) {
+    tetra <- word(gram, -3:-1); tetra <- paste(tetra, collapse = ' ')
+    tetra <- tweets.tetra_finDT[tetra][1]
+    
+    tri <- word(gram, -2:-1); tri <- paste(tri, collapse = ' ')
+    tri <- tweets.tri_finDT[tri][1]
+    
+    bi <- word(gram, -1)
+    bi <- tweets.bi_finDT[bi][1]
+    
+    ifelse (!is.na(tetra$target), tetra.target <<- tetra$target, tetra.target <- tri$target)
+    ifelse (!is.na(tetra.target), tetra.target <<- tri$target, tetra.target <<- bi$target)
+  }
+  
+  if (gram.n == 2) {
+    tri <- word(gram, -2:-1); tri <- paste(tri, collapse = ' ')
+    tri <- tweets.tri_finDT[tri][1]
+    
+    bi <- word(gram, -1)
+    bi <- tweets.bi_finDT[bi][1]
+    
+    ifelse (!is.na(tri$target), tri.target <<- tri$target, tri.target <<- bi$target)
+  }
+  
+  if (gram.n == 1) {
+    bi <- tweets.bi_finDT[gram][1]
+    bi.target <<- bi$target
+  }
+}
+
+
+
+shinyServer(function(input, output) {
+
+  observe ({
+  # Clean incoming string
+    string.0 <- tolower(input$stub); string.1 <- str_replace_all(string.0, "[^[:alnum:][:space:]'|’]", ""); 
+    string.2 <- iconv(string.1, from="UTF-8", to="ascii", sub=""); string.3 <- iconv(string.2, to="ASCII//TRANSLIT"); 
+    string.4 <- str_replace_all(string.3, "[[:digit:]]+", ""); string.4.5 <- gsub("(^[[:space:]]+|[[:space:]]+$)", "", string.4)
+    string.5 <- str_replace_all(string.4.5, paste(profanity_list, collapse = "|"), replacement = "")
+  
+    rm(string.0); rm(string.1); rm(string.2); rm(string.3); rm(string.4); rm(string.4.5)
+    
+  output$prediction <- renderText ({
+    if (input$submission == 0)
+      return ()
+    else 
+      
+    lookup(input$corpus, string.5)
+      
+    paste("Your word:", target, ".")
+    })
+  })
+})
+
+```
+
+
